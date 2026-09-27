@@ -832,6 +832,8 @@ function Set-WizardGridScaling {
     $Grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
     $Grid.AutoSizeRowsMode = [System.Windows.Forms.DataGridViewAutoSizeRowsMode]::DisplayedCells
     $Grid.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::AutoSize
+    # Header text stays on one line (see Set-WizardGridMinimumWidths for the scroll bar).
+    $Grid.ColumnHeadersDefaultCellStyle.WrapMode = [System.Windows.Forms.DataGridViewTriState]::False
 }
 
 function Save-WizardLayout {
@@ -869,6 +871,16 @@ function Set-WizardScaledBounds {
     }
 }
 
+function Set-WizardGridMinimumWidths {
+    # A column is never narrower than its header text at the current font; when the columns do not
+    # fit, the grid shows a horizontal scroll bar instead of squeezing them.
+    foreach ($grid in @($script:Wizard.Controls.VmGrid, $script:Wizard.Controls.SelectGrid, $script:Wizard.Controls.RebootGrid)) {
+        foreach ($column in $grid.Columns) {
+            $column.MinimumWidth = [System.Windows.Forms.TextRenderer]::MeasureText($column.HeaderText, $grid.Font).Width + 16
+        }
+    }
+}
+
 function Update-WizardScale {
     # Zooms the window content (positions, sizes, fonts, tabs) live with the window by the smaller of the
     # width and height ratios to the first shown size. Always computed from that reference, so
@@ -883,6 +895,7 @@ function Update-WizardScale {
         $script:Wizard.Controls.Title.Font = New-Object System.Drawing.Font('Segoe UI', [float]([Math]::Round(14 * $factor * 4) / 4), [System.Drawing.FontStyle]::Bold)
     }
     Set-WizardScaledBounds -Parent $form -Factor $factor
+    Set-WizardGridMinimumWidths
 }
 
 function New-WizardGrid {
@@ -1264,6 +1277,7 @@ function Initialize-WizardUi {
     $form.Add_Shown({
         $script:Wizard.BaseClientSize = $script:Wizard.Form.ClientSize
         $script:Wizard.BaseFont = $script:Wizard.Form.Font
+        Set-WizardGridMinimumWidths
         Save-WizardLayout -Parent $script:Wizard.Form
     })
     # Live zoom while the window is dragged, maximized or restored; every tab behaves the same.
