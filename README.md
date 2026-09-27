@@ -47,14 +47,20 @@ The wizard presents six steps. Actions that can change a guest require a separat
 5. **Reboot** — review the VMs with fresh reboot evidence and approve the reboot batch separately. The next batch waits for a newer boot time and running VMware Tools.
 6. **Verify** — start a fresh scan, then start another operator-selected round or finish the run with the remaining updates listed.
 
-The wizard does not automatically repeat a round, resend an uncertain install, or send a second reboot after an interrupted run. A terminal agent result must match its `runId`, `stepId`, mode, and parseable `finishedAt`.
+The wizard does not automatically repeat a round, resend an uncertain install, or send a second reboot after an interrupted run. A final agent result must match its `runId`, `stepId`, mode, and have a parseable `finishedAt`. A reboot counts as done only when the guest reports a boot time newer than the one saved before the reboot was sent.
+
+A failed or excluded VM (wrong name, FQDN mismatch, cluster member) is recorded and skipped; the other VMs continue. Only an unconfirmed reboot stops the next reboot batches.
+
+If a started install or reboot has no final result (for example, the guest was restarted during installation), that VM is blocked for further installs and reboots, and **Start another round** stays disabled. Check the guest manually (agent log, Windows Update history, last boot time), then use **Mark steps reviewed** on the Verify tab.
+
+If the guest rejects the credential, the wizard asks: **Retry** with a new credential, **Skip these VMs** for the rest of the run, or **Stop**.
 
 ## Certificate choices
 
 Settings contains two independent, unchecked-by-default options:
 
 - **Ignore vCenter certificate** changes PowerCLI's certificate handling for the current vCenter session.
-- **Ignore ESXi certificates for file transfers** adds the insecure curl option only to ESXi transfer calls.
+- **Ignore ESXi certificates for file transfers** adds the insecure curl option only to ESXi transfer calls. All guest file transfers, including the boot-time check, use `curl.exe`.
 
 Enabling one option does not enable the other. Ignoring a certificate means the server identity is not verified. The choices are saved in the run state and summary so a resumed run keeps the same settings.
 
@@ -72,7 +78,7 @@ Run the focused checks from 64-bit Windows PowerShell 5.1:
 & .\tests\Invoke-CoreChecks.ps1
 ```
 
-These are focused offline regressions, not exhaustive live, GUI, or WUA coverage. They use local doubles only and do not connect to vCenter, query WUA, install updates, or reboot a VM. They cover exact VM scoping and duplicate rejection, cluster blocking, exact `UpdateID + RevisionNumber` matching, terminal status evidence, independent certificate flags and channel forwarding, credential exclusion and failure summaries, and the no-duplicate-start resume guard.
+The six checks cover the key behaviours named in the plan: selecting the right VM, excluding cluster members, installing only approved `UpdateID + RevisionNumber` pairs, writing errors and the summary, independent certificate options, and no second install or reboot after resume. They use local doubles only and do not connect to vCenter, query WUA, install updates, or reboot a VM.
 
 ## Safe nonproduction pilot
 
