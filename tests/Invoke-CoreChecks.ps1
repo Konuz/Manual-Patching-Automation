@@ -27,8 +27,8 @@ function New-TestRun {
 }
 
 function New-TestVm {
-    param([string]$Id, [string]$HostName = 'app-01.example.test')
-    [pscustomobject]@{ Name = 'APP[01]'; Id = $Id; PowerState = 'PoweredOn'; ExtensionData = [pscustomobject]@{ Guest = [pscustomobject]@{ HostName = $HostName; ToolsRunningStatus = 'guestToolsRunning' } } }
+    param([string]$Id, [string]$HostName = 'app-01.example.test', [string]$Name = 'APP[01]')
+    [pscustomobject]@{ Name = $Name; Id = $Id; PowerState = 'PoweredOn'; ExtensionData = [pscustomobject]@{ Guest = [pscustomobject]@{ HostName = $HostName; ToolsRunningStatus = 'guestToolsRunning' } } }
 }
 
 $credential = New-Object System.Management.Automation.PSCredential('operator', (ConvertTo-SecureString 'check-secret' -AsPlainText -Force))
@@ -65,13 +65,18 @@ function Read-GuestStatus {
 }
 
 try {
-    Invoke-Check 'Only one exactly named VM with the expected FQDN is selected' {
+    Invoke-Check 'The right VM is selected (FQDN optional) and grouped for guest credentials' {
         $script:VmLookup = @(New-TestVm 'vm-1')
         Assert ((Get-PatchVM -Server 's' -Name 'APP[01]' -ExpectedFqdn 'app-01.example.test').Id -eq 'vm-1') 'The unique VM was not returned.'
         $script:VmLookup = @((New-TestVm 'vm-1'), (New-TestVm 'vm-2'))
         try { Get-PatchVM -Server 's' -Name 'APP[01]' -ExpectedFqdn 'app-01.example.test'; throw 'accepted' } catch { Assert ($_.Exception.Message -match 'exactly one') 'A duplicate name was accepted.' }
         $script:VmLookup = @(New-TestVm 'vm-1' 'other.example.test')
         try { Get-PatchVM -Server 's' -Name 'APP[01]' -ExpectedFqdn 'app-01.example.test'; throw 'accepted' } catch { Assert ($_.Exception.Message -match 'expected guest FQDN') 'An FQDN mismatch was accepted.' }
+        Assert ((Get-PatchVM -Server 's' -Name 'APP[01]').Id -eq 'vm-1') 'A VM without an expected FQDN was rejected.'
+        $script:VmLookup = @(New-TestVm 'vm-3' 'app03.example.test' 'app03')
+        Assert ((Get-PatchVM -Server 's' -Name 'app03.example.test').Id -eq 'vm-3') 'An FQDN entry was not found by its short VM name.'
+        Assert ((Get-PatchAccountGroup -HostName 'app03.corp.local' -VmName 'app03') -eq 'corp.local') 'A domain VM was not grouped by its DNS suffix.'
+        Assert ((Get-PatchAccountGroup -HostName 'dmz01' -VmName 'dmz01') -eq 'vm:dmz01') 'A VM without a DNS suffix did not get its own credential group.'
     }
 
     Invoke-Check 'Cluster members and unknown cluster states are excluded from install and reboot' {
@@ -82,7 +87,7 @@ try {
             Set-PatchValue $vm 'agentStatus' ([pscustomobject]@{ cluster = [pscustomobject]@{ membership = $membership } })
             foreach ($action in @('Install', 'Reboot')) {
                 try { Invoke-PatchVmAction -Action $action -RunPath $run.runPath -RunState $run -VMRecord $vm -Server 's' -GuestCredential $credential; throw 'not blocked' }
-                catch { Assert ($_.Exception.Message -match "cluster membership is $membership") "$action was not blocked for $membership." }
+                catch { Assert ($_.Exception.Message -match "cluster membership is $membership") "$action was not blocked for ${membership}: $($_.Exception.Message) $($_.ScriptStackTrace)" }
             }
         }
     }
@@ -90,7 +95,7 @@ try {
     Invoke-Check 'A controller error is written to errors.log and the summary at once, without secrets' {
         $script:ConnectFails = $true
         $run = New-TestRun 'failure'
-        $result = Invoke-PatchAction -Action Scan -RunPath $run.runPath -VCenterCredential $credential -GuestCredential $credential
+        $result = Invoke-PatchAction -Action Scan -RunPath $run.runPath -VCenterCredential $credential -GuestCredentials @{}
         $script:ConnectFails = $false
         $dir = Split-Path -Parent $run.runPath
         $errors = Get-Content (Join-Path $dir 'errors.log') -Raw
@@ -105,7 +110,8 @@ try {
         foreach ($case in @(@{ VCenter = $true; Esxi = $false }, @{ VCenter = $false; Esxi = $true })) {
             $script:VCenterFlags = @(); $script:EsxiFlags = @()
             $run = New-TestRun 'certificates' ([pscustomobject]@{ IgnoreVCenterCertificate = $case.VCenter; IgnoreEsxiCertificatesForFileTransfers = $case.Esxi })
-            $result = Invoke-PatchAction -Action Scan -RunPath $run.runPath -VCenterCredential $credential -GuestCredential $credential
+            [void](Resolve-PatchVms -RunPath $run.runPath -VCenterCredential $credential)
+            $result = Invoke-PatchAction -Action Scan -RunPath $run.runPath -VCenterCredential $credential -GuestCredentials @{ 'example.test' = $credential }
             $saved = Read-PatchRun $run.runPath
             Assert ($result.status -eq 'Completed') "The scan did not complete: $($result.vmResults | ConvertTo-Json -Compress)"
             Assert ($saved.options.ignoreVCenterCertificate -eq $case.VCenter -and $saved.options.ignoreEsxiCertificatesForFileTransfers -eq $case.Esxi) 'The choices were not saved in run.json.'

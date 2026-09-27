@@ -35,60 +35,39 @@ function Get-GuestFault {
 }
 
 function Get-PatchVM {
+    # Finds exactly one VM on this vCenter: by the saved object ID, else by exact name.
+    # An FQDN-shaped entry (app01.corp.local) that is not a VM name is retried as the short name.
+    # The guest FQDN is checked only when one is expected (plan: a mismatch blocks the VM).
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNull()]
-        [object]$Server,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string]$Name,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
+        [Parameter(Mandatory = $true)][ValidateNotNull()][object]$Server,
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$Name,
         [string]$ExpectedFqdn,
-
         [string]$SavedId
     )
 
+    $findByName = {
+        param([string]$VmName)
+        # Get-VM treats -Name as a wildcard pattern, so escape it and compare literally.
+        @(Get-VM -Name ([System.Management.Automation.WildcardPattern]::Escape($VmName)) -Server $Server -ErrorAction Stop |
+            Where-Object { [string]::Equals([string]$_.Name, $VmName, [System.StringComparison]::OrdinalIgnoreCase) })
+    }
     if (-not [string]::IsNullOrWhiteSpace($SavedId)) {
         $found = @(Get-VM -Id $SavedId -Server $Server -ErrorAction Stop)
     }
     else {
-        # Get-VM treats -Name as a wildcard pattern. Escape it before the lookup and
-        # keep the literal comparison below as the final identity check.
-        $escapedName = [System.Management.Automation.WildcardPattern]::Escape($Name)
-        $found = @(Get-VM -Name $escapedName -Server $Server -ErrorAction Stop | Where-Object {
-                [string]::Equals([string]$_.Name, $Name, [System.StringComparison]::OrdinalIgnoreCase)
-            })
+        $found = @(& $findByName $Name)
+        if ($found.Count -eq 0 -and $Name.Contains('.')) { $found = @(& $findByName $Name.Split(".")[0]) }
     }
-
     if ($found.Count -ne 1) {
         throw ('Expected exactly one VM named {0}; found {1}.' -f $Name, $found.Count)
     }
 
     $vm = $found[0]
-    if (-not [string]::Equals([string]$vm.Name, $Name, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw ('Saved VM identity does not match the requested name {0}.' -f $Name)
-    }
-
-    $actualId = $null
-    $idProperty = $vm.PSObject.Properties['Id']
-    if ($null -ne $idProperty) {
-        $actualId = [string]$idProperty.Value
-    }
-    if (-not [string]::IsNullOrWhiteSpace($SavedId) -and -not [string]::IsNullOrWhiteSpace($actualId) -and
-        -not [string]::Equals($actualId, $SavedId, [System.StringComparison]::Ordinal)) {
-        throw ('Saved VM id {0} resolved to a different VM id {1}.' -f $SavedId, $actualId)
-    }
-
     $guest = $vm.ExtensionData.Guest
-    $guestHostName = [string]$guest.HostName
-    $normalizedExpected = $ExpectedFqdn.Trim().TrimEnd('.')
-    $normalizedActual = $guestHostName.Trim().TrimEnd('.')
-    if ([string]::IsNullOrWhiteSpace($normalizedActual) -or
-        -not [string]::Equals($normalizedActual, $normalizedExpected, [System.StringComparison]::OrdinalIgnoreCase)) {
+    $guestHostName = ([string]$guest.HostName).Trim().TrimEnd('.')
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedFqdn) -and
+        -not [string]::Equals($guestHostName, $ExpectedFqdn.Trim().TrimEnd('.'), [System.StringComparison]::OrdinalIgnoreCase)) {
         throw ('VM {0} does not have the expected guest FQDN {1}. VMware Tools reported: {2}' -f $Name, $ExpectedFqdn, $guestHostName)
     }
 

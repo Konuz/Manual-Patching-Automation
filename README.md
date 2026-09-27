@@ -22,25 +22,31 @@ The guest must have Windows PowerShell 5.1 and the local Windows Update Agent av
 
 ## VM input
 
-Type VM entries into the Settings page, or use **Load text file** to load a text file. Use one VM per line in this format:
+Type VM entries into the Settings page, or use **Load text file**. One VM per line, in any of these forms:
 
 ```text
-VM name|expected FQDN
+APP-01
+app-02.example.test
+DMZ-WEB|dmz-web.dmz.local
 ```
 
-For example:
+A name must resolve to exactly one VM on the selected vCenter. An FQDN that is not a VM name is looked up by its short name (`app-02`). The FQDN is optional; when one is given, VMware Tools must report it, otherwise the VM is blocked.
 
-```text
-APP-01|app-01.example.test
-```
+## Guest credentials
 
-The name is resolved on the selected vCenter. A name must resolve to exactly one VM, and VMware Tools must report the expected FQDN before an action proceeds.
+Before the first action, the wizard finds the VMs in vCenter (vCenter credential only) and groups them by the DNS suffix VMware Tools reports:
+
+- VMs with the same suffix (e.g. `example.test`) share one prompt: **Guest credential for domain example.test**.
+- A VM without a suffix, typically a DMZ server with its own local administrator, gets its own prompt.
+- If a domain credential is rejected on only some VMs of that domain (e.g. DMZ servers that share the DNS suffix), **Retry** asks for those VMs one by one. If it is rejected on all of them, the domain password is asked again.
+
+The groups are shown in the **Account group** column and saved in `run.json`; the credentials are kept in memory only and asked again after **Resume run**.
 
 ## Operator workflow
 
 The wizard presents six steps. Actions that can change a guest require a separate explicit approval in the corresponding step.
 
-1. **Settings** — choose the vCenter, credentials, VM entries, run folder, and concurrency. Create a new run or choose **Resume run**.
+1. **Settings** — choose the vCenter, vCenter credential, VM entries, run folder, and concurrency. Create a new run or choose **Resume run**.
 2. **Scan** — start the scan. The guest reports offered updates, pending reboot state, and cluster membership.
 3. **Select updates** — review the per-VM list, including optional updates and drivers, then approve the selected `UpdateID + RevisionNumber` values for installation.
 4. **Install** — approve installation. The agent searches again and installs only the still-offered selected revisions. The agent does not reboot the guest.

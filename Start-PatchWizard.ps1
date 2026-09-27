@@ -16,7 +16,8 @@ $script:Wizard = @{
     RunPath = $null
     RunState = $null
     VCenterCredential = $null
-    GuestCredential = $null
+    GuestCredentials = @{}
+    PendingAction = $null
     ActivePowerShell = $null
     ActiveAsyncResult = $null
     ActiveAction = $null
@@ -76,26 +77,19 @@ function Get-WizardPositiveInteger {
 }
 
 function ConvertTo-WizardVmEntries {
+    # One VM per line: "VM name", "FQDN" or "VM name|FQDN". The FQDN is optional; when given it is checked.
     param([Parameter(Mandatory = $true)][string]$Text)
 
     $entries = @()
-    $lineNumber = 0
     foreach ($line in ($Text -split "`r?`n")) {
-        $lineNumber++
-        $trimmed = $line.Trim()
-        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
-        $parts = $trimmed.Split(@('|'), 2, [System.StringSplitOptions]::None)
-        if ($parts.Count -ne 2 -or [string]::IsNullOrWhiteSpace($parts[0]) -or [string]::IsNullOrWhiteSpace($parts[1])) {
-            throw ('VM line {0} must use the format: VM name|expected FQDN.' -f $lineNumber)
-        }
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $parts = $line.Split('|')
         $entries += [pscustomobject]@{
             VmName = $parts[0].Trim()
-            ExpectedFqdn = $parts[1].Trim().TrimEnd('.')
+            ExpectedFqdn = $(if ($parts.Count -gt 1) { $parts[1].Trim().TrimEnd('.') } else { '' })
         }
     }
-    if ($entries.Count -eq 0) {
-        throw 'Enter at least one VM as VM name|expected FQDN.'
-    }
+    if ($entries.Count -eq 0) { throw 'Enter at least one VM.' }
     return @($entries)
 }
 
@@ -204,7 +198,7 @@ function New-WizardRun {
         $script:Wizard.RunState = New-PatchRun -Config $config -VMEntries $entries
         $script:Wizard.RunPath = [string](Get-PatchValue $script:Wizard.RunState @('runPath') '')
         $script:Wizard.VCenterCredential = $null
-        $script:Wizard.GuestCredential = $null
+        $script:Wizard.GuestCredentials = @{}
         $script:Wizard.Controls.OpenLogs.Enabled = $true
         $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}' -f $script:Wizard.RunPath)
         Set-WizardStatus -Message ('Created run {0}.' -f [string](Get-PatchValue $script:Wizard.RunState @('runId') ''))
@@ -218,25 +212,28 @@ function New-WizardRun {
 }
 
 function Request-WizardCredential {
-    param([ValidateSet('vCenter', 'guest')][string]$Kind)
+    param([ValidateSet('vCenter')][string]$Kind = 'vCenter')
 
-    $message = if ($Kind -eq 'vCenter') { 'Enter the vCenter credential for this run.' } else { 'Enter the Windows guest credential for this run.' }
-    try {
-        $credential = Get-Credential -Message $message
-    }
-    catch {
-        Show-WizardError -Message ('Credential prompt failed: {0}' -f $_.Exception.Message)
-        return
-    }
+    $credential = Get-Credential -Message 'Enter the vCenter credential for this run.'
     if ($null -eq $credential) { return }
-    if ($Kind -eq 'vCenter') {
-        $script:Wizard.VCenterCredential = $credential
-        Set-WizardStatus -Message ('vCenter credential held in memory for {0}.' -f $credential.UserName)
+    $script:Wizard.VCenterCredential = $credential
+    Set-WizardStatus -Message ('vCenter credential held in memory for {0}.' -f $credential.UserName)
+}
+
+function Request-WizardGuestCredentials {
+    # Asks once per credential group that has no credential yet: one prompt per domain (DNS suffix),
+    # one per VM without a suffix (e.g. DMZ servers with a local administrator). Memory only.
+    $vms = @(Get-PatchArray $script:Wizard.RunState.vms | Where-Object { $_.status -ne 'SkippedGuestAccount' -and -not [string]::IsNullOrWhiteSpace([string]$_.accountGroup) })
+    foreach ($group in @($vms | ForEach-Object { [string]$_.accountGroup } | Sort-Object -Unique)) {
+        if ($script:Wizard.GuestCredentials.ContainsKey($group)) { continue }
+        $names = @($vms | Where-Object { $_.accountGroup -eq $group } | ForEach-Object { $_.vmName }) -join ', '
+        $message = if ($group.StartsWith('vm:')) { 'Local administrator credential for VM {0}.' -f $names } else { 'Guest credential for domain {0} (VMs: {1}).' -f $group, $names }
+        $credential = Get-Credential -Message $message
+        if ($null -eq $credential) { return $false }
+        $script:Wizard.GuestCredentials[$group] = $credential
+        Set-WizardStatus -Message ('Guest credential for {0} held in memory.' -f $group)
     }
-    else {
-        $script:Wizard.GuestCredential = $credential
-        Set-WizardStatus -Message ('Guest credential held in memory for {0}.' -f $credential.UserName)
-    }
+    return $true
 }
 
 function Resume-WizardRun {
@@ -257,7 +254,7 @@ function Resume-WizardRun {
         $script:Wizard.RunPath = $dialog.FileName
         # Credentials are never saved; they are asked for again when the next action starts.
         $script:Wizard.VCenterCredential = $null
-        $script:Wizard.GuestCredential = $null
+        $script:Wizard.GuestCredentials = @{}
         Set-WizardSettingsFromRun -RunState $state
         $script:Wizard.Controls.OpenLogs.Enabled = $true
         $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}' -f $script:Wizard.RunPath)
@@ -361,7 +358,7 @@ function Refresh-WizardVmGrid {
         if ($grid.Rows.Count -ne $vms.Count) {
             $grid.Rows.Clear()
             foreach ($vm in $vms) {
-                [void]$grid.Rows.Add('', '', '', '', '', '', '')
+                [void]$grid.Rows.Add('', '', '', '', '', '', '', '')
             }
         }
         for ($i = 0; $i -lt $vms.Count; $i++) {
@@ -376,6 +373,7 @@ function Refresh-WizardVmGrid {
             $grid.Rows[$i].Cells[5].Value = [string](Get-PatchValue $reboot @('status') 'NotRequested')
             $errors = @(Get-PatchArray (Get-PatchValue $vm @('errors') @()))
             $grid.Rows[$i].Cells[6].Value = [string]$errors.Count
+            $grid.Rows[$i].Cells[7].Value = [string](Get-PatchValue $vm @('accountGroup') '')
         }
     }
     finally {
@@ -509,29 +507,41 @@ function Resolve-WizardCredentialRejection {
     param([string]$Action)
 
     # Plan step 1: a rejected guest credential offers Retry, Skip (for the rest of this run), or Stop.
-    $affected = @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()) |
-        Where-Object { [string](Get-PatchValue $_ @('status') '') -eq 'GuestCredentialRejected' })
+    $allVms = @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))
+    $affected = @($allVms | Where-Object { [string](Get-PatchValue $_ @('status') '') -eq 'GuestCredentialRejected' })
     if ($affected.Count -eq 0) { return 'None' }
 
     $names = @($affected | ForEach-Object { [string](Get-PatchValue $_ @('vmName') '') })
     $choice = Show-WizardCredentialDecision -VmNames $names
     if ($choice -eq 'Retry') {
-        $script:Wizard.GuestCredential = $null
-        Request-WizardCredential -Kind guest
-        if ($null -eq $script:Wizard.GuestCredential) {
-            Set-WizardStatus -Message 'Retry cancelled because no replacement guest credential was supplied.'
+        # Rejected on some VMs of a domain only (e.g. DMZ servers sharing the DNS suffix): those VMs
+        # get their own credential. Rejected on every VM of the domain: the domain password is asked again.
+        $partlyRejected = @($affected | ForEach-Object { [string]$_.accountGroup } | Sort-Object -Unique | Where-Object {
+                $group = $_
+                -not $group.StartsWith('vm:') -and @($allVms | Where-Object { $_.accountGroup -eq $group -and $_.status -ne 'GuestCredentialRejected' }).Count -gt 0
+            })
+        foreach ($vm in $affected) {
+            $group = [string]$vm.accountGroup
+            if ($group -in $partlyRejected) {
+                $group = 'vm:' + $vm.vmName
+                Set-PatchValue -InputObject $vm -Name 'accountGroup' -Value $group
+            }
+            $script:Wizard.GuestCredentials.Remove($group)
+            Set-PatchValue -InputObject $vm -Name 'status' -Value 'Pending'
+        }
+        if (-not (Request-WizardGuestCredentials)) {
+            Set-WizardStatus -Message 'Retry cancelled because a replacement guest credential was not entered.'
+            Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
             return 'Cancel'
         }
-        foreach ($vm in $affected) { Set-PatchValue -InputObject $vm -Name 'status' -Value 'Pending' }
         Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
         return 'Retry'
     }
     if ($choice -eq 'Skip') {
         foreach ($vm in $affected) { Set-PatchValue -InputObject $vm -Name 'status' -Value 'SkippedGuestAccount' }
-        $message = 'Operator skipped the rejected guest account for this run.'
+        $message = 'Operator skipped the VMs whose guest credential was rejected, for the rest of this run.'
     }
     else {
-        $script:Wizard.GuestCredential = $null
         Set-PatchValue -InputObject $script:Wizard.RunState -Name 'status' -Value 'Stopped'
         Set-PatchValue -InputObject $script:Wizard.RunState -Name 'stopReason' -Value 'Operator stopped after guest credential rejection.'
         $message = 'Operator stopped after guest credential rejection.'
@@ -546,17 +556,17 @@ function Resolve-WizardCredentialRejection {
 function Start-WizardAction {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('Scan', 'Install', 'Reboot', 'Verify')][string]$Action,
-        [switch]$ApprovalAlreadyGiven
+        [switch]$ApprovalAlreadyGiven,
+        [switch]$VmsResolved
     )
 
     try {
         if ($null -ne $script:Wizard.ActivePowerShell) { throw 'An action is already running.' }
         if ($null -eq $script:Wizard.RunState -or [string]::IsNullOrWhiteSpace([string]$script:Wizard.RunPath)) { throw 'Create or resume a run first.' }
-        if ($null -eq $script:Wizard.VCenterCredential) { Request-WizardCredential -Kind vCenter }
+        if ($null -eq $script:Wizard.VCenterCredential) { Request-WizardCredential }
+        if ($null -eq $script:Wizard.VCenterCredential) { throw 'The vCenter credential is required.' }
         $credentialDecision = Resolve-WizardCredentialRejection -Action $Action
         if ($credentialDecision -in @('Skip', 'Stop', 'Cancel')) { return }
-        if ($null -eq $script:Wizard.GuestCredential) { Request-WizardCredential -Kind guest }
-        if ($null -eq $script:Wizard.VCenterCredential -or $null -eq $script:Wizard.GuestCredential) { throw 'Both vCenter and guest credentials are required.' }
         if ($Action -eq 'Install' -and -not $ApprovalAlreadyGiven) {
             Save-WizardSelections
             $selectedCount = @($script:Wizard.RunState.selectedUpdates).Count
@@ -573,37 +583,53 @@ function Start-WizardAction {
             if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         }
 
-        $controller = $script:ControllerPath
-        $runPath = [string]$script:Wizard.RunPath
-        $vcCredential = $script:Wizard.VCenterCredential
-        $guestCredential = $script:Wizard.GuestCredential
-        $workerScript = {
-            param($ControllerPath, $ActionName, $RunFilePath, $VCenterCredential, $GuestCredential)
-            try {
-                . $ControllerPath
-                return (Invoke-PatchAction -Action $ActionName -RunPath $RunFilePath -VCenterCredential $VCenterCredential -GuestCredential $GuestCredential)
-            }
-            catch {
-                return [pscustomobject]@{ status = 'Stopped'; action = $ActionName; runPath = $RunFilePath; error = $_.Exception.Message; vmResults = @() }
-            }
+        # VMs not yet found in vCenter are resolved first (vCenter credential only), so the guest
+        # credentials can be asked per domain or per VM. The action continues when that finishes.
+        $unresolved = @(Get-PatchArray $script:Wizard.RunState.vms | Where-Object { $_.status -ne 'SkippedGuestAccount' -and [string]::IsNullOrWhiteSpace([string]$_.accountGroup) })
+        if ($unresolved.Count -gt 0 -and -not $VmsResolved) {
+            $script:Wizard.PendingAction = $Action
+            Start-WizardWorker -Action 'Resolve'
+            return
         }
-        $powerShell = [PowerShell]::Create()
-        [void]$powerShell.AddScript($workerScript.ToString())
-        [void]$powerShell.AddArgument($controller)
-        [void]$powerShell.AddArgument($Action)
-        [void]$powerShell.AddArgument($runPath)
-        [void]$powerShell.AddArgument($vcCredential)
-        [void]$powerShell.AddArgument($guestCredential)
-        $script:Wizard.ActivePowerShell = $powerShell
-        $script:Wizard.ActiveAsyncResult = $powerShell.BeginInvoke()
-        $script:Wizard.ActiveAction = $Action
-        $script:Wizard.ActiveStartedAt = Get-Date
-        Set-WizardStatus -Message ('{0} is running asynchronously. The window remains responsive.' -f $Action)
-        Update-WizardStepState
+        if (-not (Request-WizardGuestCredentials)) {
+            Set-WizardStatus -Message ('{0} cancelled: a guest credential was not entered.' -f $Action)
+            return
+        }
+        Start-WizardWorker -Action $Action
     }
     catch {
         Show-WizardError -Message $_.Exception.Message
     }
+}
+
+function Start-WizardWorker {
+    # Runs one controller call in a background runspace so the window stays responsive.
+    param([Parameter(Mandatory = $true)][string]$Action)
+
+    $workerScript = {
+        param($ControllerPath, $ActionName, $RunFilePath, $VCenterCredential, $GuestCredentials)
+        try {
+            . $ControllerPath
+            if ($ActionName -eq 'Resolve') { return (Resolve-PatchVms -RunPath $RunFilePath -VCenterCredential $VCenterCredential) }
+            return (Invoke-PatchAction -Action $ActionName -RunPath $RunFilePath -VCenterCredential $VCenterCredential -GuestCredentials $GuestCredentials)
+        }
+        catch {
+            return [pscustomobject]@{ status = 'Stopped'; action = $ActionName; error = $_.Exception.Message }
+        }
+    }
+    $powerShell = [PowerShell]::Create()
+    [void]$powerShell.AddScript($workerScript.ToString())
+    [void]$powerShell.AddArgument($script:ControllerPath)
+    [void]$powerShell.AddArgument($Action)
+    [void]$powerShell.AddArgument([string]$script:Wizard.RunPath)
+    [void]$powerShell.AddArgument($script:Wizard.VCenterCredential)
+    [void]$powerShell.AddArgument($script:Wizard.GuestCredentials)
+    $script:Wizard.ActivePowerShell = $powerShell
+    $script:Wizard.ActiveAsyncResult = $powerShell.BeginInvoke()
+    $script:Wizard.ActiveAction = $Action
+    $script:Wizard.ActiveStartedAt = Get-Date
+    Set-WizardStatus -Message ('{0} is running in the background. The window remains responsive.' -f $Action)
+    Update-WizardStepState
 }
 
 function Complete-WizardAction {
@@ -630,6 +656,20 @@ function Complete-WizardAction {
     }
     catch {
         Set-WizardStatus -Message ('Action finished, but run state could not be read: {0}' -f $_.Exception.Message)
+    }
+
+    if ($action -eq 'Resolve') {
+        Refresh-WizardVmGrid
+        Refresh-WizardRunLog
+        $pendingAction = $script:Wizard.PendingAction
+        $script:Wizard.PendingAction = $null
+        if ([string]$result.status -ne 'Completed') {
+            Show-WizardError -Message ('VMs could not be looked up in vCenter: {0}' -f $result.error)
+            Update-WizardStepState
+            return
+        }
+        Start-WizardAction -Action $pendingAction -ApprovalAlreadyGiven -VmsResolved
+        return
     }
 
     if ($null -ne $result) {
@@ -855,14 +895,9 @@ function Initialize-WizardUi {
     $vcButton.Location = New-Object System.Drawing.Point(530, 8)
     $vcButton.Size = New-Object System.Drawing.Size(170, 27)
     $vcButton.Add_Click({ Request-WizardCredential -Kind vCenter })
-    $guestButton = New-Object System.Windows.Forms.Button
-    $guestButton.Text = 'Get guest credential'
-    $guestButton.Location = New-Object System.Drawing.Point(710, 8)
-    $guestButton.Size = New-Object System.Drawing.Size(155, 27)
-    $guestButton.Add_Click({ Request-WizardCredential -Kind guest })
 
     $vmLabel = New-WizardLabel -Text 'VM entries' -X 10 -Y 48
-    $vmHint = New-WizardLabel -Text 'One per line: VM name|expected FQDN' -X 155 -Y 48 -Width 400 -Height 22
+    $vmHint = New-WizardLabel -Text 'One per line: VM name, FQDN, or VM name|FQDN. Guest credentials are asked per domain.' -X 155 -Y 48 -Width 400 -Height 22
     $vmHint.ForeColor = [System.Drawing.Color]::DimGray
     $vmText = New-Object System.Windows.Forms.TextBox
     $vmText.Location = New-Object System.Drawing.Point(155, 70)
@@ -969,7 +1004,7 @@ function Initialize-WizardUi {
     $resume.Add_Click({ Resume-WizardRun })
     $runPathLabel = New-WizardLabel -Text 'No active run' -X 310 -Y 510 -Width 690 -Height 30
     $runPathLabel.ForeColor = [System.Drawing.Color]::DimGray
-    $settingsPanel.Controls.AddRange(@($vcLabel, $vcText, $vcButton, $guestButton, $vmLabel, $vmHint, $vmText, $loadFile, $outputLabel, $outputText, $browseOutput, $concurrencyLabel, $scanConcurrency, $installConcurrencyLabel, $installConcurrency, $rebootBatchLabel, $rebootBatch, $advancedToggle, $advancedPanel, $ignoreVc, $ignoreEsxi, $certificateHint, $newRun, $resume, $runPathLabel))
+    $settingsPanel.Controls.AddRange(@($vcLabel, $vcText, $vcButton, $vmLabel, $vmHint, $vmText, $loadFile, $outputLabel, $outputText, $browseOutput, $concurrencyLabel, $scanConcurrency, $installConcurrencyLabel, $installConcurrency, $rebootBatchLabel, $rebootBatch, $advancedToggle, $advancedPanel, $ignoreVc, $ignoreEsxi, $certificateHint, $newRun, $resume, $runPathLabel))
 
     $scanTab = New-Object System.Windows.Forms.TabPage
     $scanTab.Text = 'Scan'
@@ -978,7 +1013,7 @@ function Initialize-WizardUi {
     $scanButton.Dock = [System.Windows.Forms.DockStyle]::Top
     $scanButton.Height = 34
     $scanButton.Add_Click({ Start-WizardAction -Action Scan })
-    $vmGrid = New-WizardGrid -Headers @('VM', 'Expected FQDN', 'Status', 'Current action', 'Offered updates', 'Reboot', 'Errors') -Widths @(190, 220, 145, 125, 100, 125, 65)
+    $vmGrid = New-WizardGrid -Headers @('VM', 'Expected FQDN', 'Status', 'Current action', 'Offered updates', 'Reboot', 'Errors', 'Account group') -Widths @(170, 200, 135, 110, 95, 115, 55, 150)
     $scanTab.Controls.Add($vmGrid)
     $scanTab.Controls.Add($scanButton)
     [void]$tabs.TabPages.Add($scanTab)
