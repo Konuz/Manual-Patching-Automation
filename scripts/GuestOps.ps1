@@ -25,6 +25,15 @@ function Connect-PatchVCenter {
     return (Connect-VIServer -Server $ServerName -Credential $Credential -ErrorAction Stop)
 }
 
+function Get-GuestFault {
+    # Returns the vSphere MethodFault behind a PowerCLI exception, or $null.
+    param([System.Exception]$Exception)
+    for ($current = $Exception; $null -ne $current; $current = $current.InnerException) {
+        if ($current -is [VMware.Vim.VimException]) { return $current.MethodFault }
+    }
+    return $null
+}
+
 function Get-PatchVM {
     [CmdletBinding()]
     param(
@@ -150,7 +159,15 @@ function Get-GuestContext {
     $authentication.Password = $GuestCredential.GetNetworkCredential().Password
     $authentication.InteractiveSession = $false
     # ValidateCredentialsInGuest returns no value; a fault is the failure signal.
-    $authManager.ValidateCredentialsInGuest($vmView.MoRef, $authentication)
+    try {
+        $authManager.ValidateCredentialsInGuest($vmView.MoRef, $authentication)
+    }
+    catch {
+        if ((Get-GuestFault $_.Exception) -is [VMware.Vim.InvalidGuestLogin]) {
+            throw (New-Object System.Security.Authentication.InvalidCredentialException('The guest rejected the supplied credential.'))
+        }
+        throw
+    }
     $guestAuthentication = $authentication
 
     $environmentValues = @($processManager.ReadEnvironmentVariableInGuest($vmView.MoRef, $guestAuthentication, @('ProgramData')))
@@ -244,19 +261,7 @@ function Send-GuestFile {
         $Context.FileManager.MakeDirectoryInGuest($Context.VMView.MoRef, $Context.GuestAuth, $guestDirectory, $true)
     }
     catch {
-        $vimException = $null
-        $currentException = $_.Exception
-        while ($null -ne $currentException) {
-            if ($currentException -is [VMware.Vim.VimException]) {
-                $vimException = $currentException
-                break
-            }
-            $currentException = $currentException.InnerException
-        }
-        if ($null -eq $vimException -or $null -eq $vimException.MethodFault -or
-            -not ($vimException.MethodFault -is [VMware.Vim.FileAlreadyExists])) {
-            throw
-        }
+        if (-not ((Get-GuestFault $_.Exception) -is [VMware.Vim.FileAlreadyExists])) { throw }
     }
 
     $attributes = New-Object VMware.Vim.GuestFileAttributes
@@ -392,18 +397,8 @@ function Read-GuestStatus {
         Receive-GuestFile -Context $Context -GuestPath $guestStatusPath -LocalPath $LocalPath -IgnoreEsxiCertificate:$IgnoreEsxiCertificate | Out-Null
     }
     catch {
-        $isMissing = $false
-        $currentException = $_.Exception
-        while ($null -ne $currentException) {
-            if ($currentException -is [VMware.Vim.FileNotFound]) {
-                $isMissing = $true
-                break
-            }
-            $currentException = $currentException.InnerException
-        }
-        if ($isMissing -or $_.Exception.Message -match '(?i)not found|does not exist|no such file') {
-            return $null
-        }
+        # The agent has not written status.json yet.
+        if ((Get-GuestFault $_.Exception) -is [VMware.Vim.FileNotFound]) { return $null }
         throw
     }
 

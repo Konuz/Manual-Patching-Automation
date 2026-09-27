@@ -612,7 +612,7 @@ function Show-WizardCredentialDecision {
     $label = New-Object System.Windows.Forms.Label
     $label.Location = New-Object System.Drawing.Point(12, 12)
     $label.Size = New-Object System.Drawing.Size(536, 72)
-    $label.Text = ('The guest credential was rejected for: {0}{1}{1}Choose Retry for a fresh credential, Skip this guest account for the rest of this run, or Stop.' -f ($VmNames -join ', '), [Environment]::NewLine)
+    $label.Text = ('The guest credential was rejected for: {0}{1}{1}Choose Retry for a fresh credential, Skip these VMs for the rest of this run, or Stop.' -f ($VmNames -join ', '), [Environment]::NewLine)
     $label.AutoSize = $false
     $dialog.Controls.Add($label)
     $retry = New-Object System.Windows.Forms.Button
@@ -620,7 +620,7 @@ function Show-WizardCredentialDecision {
     $retry.Size = New-Object System.Drawing.Size(100, 30)
     $retry.Location = New-Object System.Drawing.Point(150, 120)
     $skip = New-Object System.Windows.Forms.Button
-    $skip.Text = 'Skip this guest account'
+    $skip.Text = 'Skip these VMs'
     $skip.Size = New-Object System.Drawing.Size(150, 30)
     $skip.Location = New-Object System.Drawing.Point(260, 120)
     $stop = New-Object System.Windows.Forms.Button
@@ -641,11 +641,11 @@ function Show-WizardCredentialDecision {
 function Resolve-WizardCredentialRejection {
     param([string]$Action)
 
+    # Plan step 1: a rejected guest credential offers Retry, Skip (for the rest of this run), or Stop.
     $affected = @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()) |
-        Where-Object { [string](Get-WizardProperty $_ @('status') '') -match '^(GuestCredentialRejected|GuestCredentialRejectedPendingDecision|SkippedAccountPendingDecision)$' })
+        Where-Object { [string](Get-WizardProperty $_ @('status') '') -eq 'GuestCredentialRejected' })
     if ($affected.Count -eq 0) { return 'None' }
 
-    $rejected = @($affected | Where-Object { [string](Get-WizardProperty $_ @('status') '') -match '^GuestCredentialRejected' })
     $names = @($affected | ForEach-Object { [string](Get-WizardProperty $_ @('vmName') '') })
     $choice = Show-WizardCredentialDecision -VmNames $names
     if ($choice -eq 'Retry') {
@@ -655,49 +655,25 @@ function Resolve-WizardCredentialRejection {
             Set-WizardStatus -Message 'Retry cancelled because no replacement guest credential was supplied.'
             return 'Cancel'
         }
-        foreach ($vm in $affected) {
-            Set-WizardProperty -InputObject $vm -Name 'status' -Value 'Pending'
-            Set-WizardProperty -InputObject $vm -Name 'rejectedGuestAccountKey' -Value $null
-            Set-WizardProperty -InputObject $vm -Name 'rejectedGuestAccountIsLocal' -Value $null
-        }
+        foreach ($vm in $affected) { Set-WizardProperty -InputObject $vm -Name 'status' -Value 'Pending' }
         Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
         return 'Retry'
     }
     if ($choice -eq 'Skip') {
-        $isLocalAccount = [bool](Get-WizardProperty $rejected[0] @('rejectedGuestAccountIsLocal') $false)
-        $rejectedNames = @($rejected | ForEach-Object { [string](Get-WizardProperty $_ @('vmName') '') })
-        $skippedAccounts = @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('skippedGuestAccounts') @()))
-        foreach ($vm in $affected) {
-            $vmName = [string](Get-WizardProperty $vm @('vmName') '')
-            if ($isLocalAccount -and $vmName -notin $rejectedNames) {
-                Set-WizardProperty -InputObject $vm -Name 'status' -Value 'Pending'
-                Set-WizardProperty -InputObject $vm -Name 'rejectedGuestAccountKey' -Value $null
-                Set-WizardProperty -InputObject $vm -Name 'rejectedGuestAccountIsLocal' -Value $null
-                continue
-            }
-            $key = [string](Get-WizardProperty $vm @('rejectedGuestAccountKey') '')
-            if ([string]::IsNullOrWhiteSpace($key)) { throw ('Rejected guest account key is missing for VM {0}.' -f $vmName) }
-            if ($skippedAccounts -notcontains $key) { $skippedAccounts += $key }
-            Set-WizardProperty -InputObject $vm -Name 'status' -Value 'SkippedGuestAccount'
-            Set-WizardProperty -InputObject $vm -Name 'rejectedGuestAccountKey' -Value $null
-            Set-WizardProperty -InputObject $vm -Name 'rejectedGuestAccountIsLocal' -Value $null
-        }
-        Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'skippedGuestAccounts' -Value $skippedAccounts
-        Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
-        Write-PatchEvent -RunPath $script:Wizard.RunPath -Message 'Operator skipped the rejected guest account.' -Step $Action -Level 'WARN'
-        Write-PatchSummary -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState
-        Set-WizardStatus -Message 'Guest account skipped for this run.'
-        return 'Skip'
+        foreach ($vm in $affected) { Set-WizardProperty -InputObject $vm -Name 'status' -Value 'SkippedGuestAccount' }
+        $message = 'Operator skipped the rejected guest account for this run.'
     }
-
-    $script:Wizard.GuestCredential = $null
-    Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'status' -Value 'Stopped'
-    Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'stopReason' -Value 'Operator stopped after guest credential rejection.'
+    else {
+        $script:Wizard.GuestCredential = $null
+        Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'status' -Value 'Stopped'
+        Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'stopReason' -Value 'Operator stopped after guest credential rejection.'
+        $message = 'Operator stopped after guest credential rejection.'
+    }
     Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
-    Write-PatchEvent -RunPath $script:Wizard.RunPath -Message 'Operator stopped after guest credential rejection.' -Step $Action -Level 'WARN'
+    Write-PatchEvent -RunPath $script:Wizard.RunPath -Message $message -Step $Action -Level 'WARN'
     Write-PatchSummary -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState
-    Set-WizardStatus -Message 'Operator stopped after guest credential rejection.'
-    return 'Stop'
+    Set-WizardStatus -Message $message
+    return $choice
 }
 
 function Start-WizardAction {
@@ -842,7 +818,8 @@ function Start-WizardNewRound {
             Set-WizardProperty -InputObject $vm -Name 'selectionSaved' -Value $false
             Set-WizardProperty -InputObject $vm -Name 'pendingUpdates' -Value @()
             Set-WizardProperty -InputObject $vm -Name 'reboot' -Value ([pscustomobject]@{ status = 'NotRequested'; required = $false; baselineBootTime = $null; requestEvidence = $null; confirmedBootTime = $null })
-            Set-WizardProperty -InputObject $vm -Name 'status' -Value 'Pending'
+            # A skipped guest account stays skipped for the rest of the run.
+            if ([string](Get-WizardProperty $vm @('status') '') -ne 'SkippedGuestAccount') { Set-WizardProperty -InputObject $vm -Name 'status' -Value 'Pending' }
             Set-WizardProperty -InputObject $vm -Name 'currentAction' -Value $null
             Set-WizardProperty -InputObject $vm -Name 'agentStatus' -Value $null
         }

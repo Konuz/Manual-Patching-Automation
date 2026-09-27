@@ -2,7 +2,6 @@
 # Public functions:
 #   New-PatchRun(config, VM entries) creates runs/<runId>/run.json without credentials.
 #   Read-PatchRun, Write-PatchRun, Write-PatchEvent, Write-PatchError persist run state and logs.
-#   Get-PatchGuestAccountKey returns an opaque per-run account/VM skip key for GUI state.
 #   Invoke-PatchAction(Action, RunPath, VCenterCredential, GuestCredential) runs one operator step.
 
 Set-StrictMode -Version 2.0
@@ -333,8 +332,6 @@ function New-PatchRun {
             reboot = [ordered]@{ status = 'NotRequested'; required = $false; baselineBootTime = $null; requestEvidence = $null; confirmedBootTime = $null }
             steps = @()
             agentStatus = $null
-            rejectedGuestAccountKey = $null
-            rejectedGuestAccountIsLocal = $null
             errors = @()
             errorLinks = @()
         }
@@ -362,7 +359,6 @@ function New-PatchRun {
         currentRound = 1
         currentAction = $null
         selectedUpdates = @()
-        skippedGuestAccounts = @()
         vms = @($vmRecords)
         errors = @()
         errorLinks = @()
@@ -707,14 +703,6 @@ function Get-PatchMutatingStepBlocker {
     return $null
 }
 
-function Get-PatchErrorCode {
-    param([string]$Message)
-    if ($Message -match '(?i)credential|authentication|unauthori[sz]ed|login|password|access.denied') { return 'GuestCredentialRejected' }
-    if ($Message -match '(?i)fqdn|host.name|identity') { return 'GuestFqdnMismatch' }
-    if ($Message -match '(?i)cluster') { return 'ClusterStateBlocked' }
-    return 'PatchActionFailed'
-}
-
 function Get-PatchAgentLocalPaths {
     param([string]$RunPath, $VMRecord, $Step)
     $safeName = ([string](Get-PatchValue $VMRecord @('vmName') 'vm')) -replace '[^a-zA-Z0-9_.-]', '_'
@@ -753,77 +741,6 @@ function Test-PatchVmRequiresReboot {
     foreach ($update in @(Get-PatchArray -Value (Get-PatchValue -InputObject $VMRecord -Names @('installedUpdates') -Default @()))) {
         $required = Get-PatchValue -InputObject $update -Names @('rebootRequired', 'requiresReboot') -Default $null
         if ($null -ne $required -and [bool]$required) { return $true }
-    }
-    return $false
-}
-
-function Get-PatchGuestAccountScope {
-    param($VMRecord, $GuestCredential)
-
-    $userName = ([string](Get-PatchValue $GuestCredential @('UserName') '')).Trim()
-    $isLocal = $false
-    if ($userName -match '(?i)^(?:\.\\[^\\/@]+|[^\\/@]+)$') {
-        $isLocal = $true
-    }
-    elseif ($userName -match '^(?<machine>[^\\/@]+)\\[^\\/@]+$') {
-        $machine = [string]$Matches['machine']
-        $vmName = ([string](Get-PatchValue $VMRecord @('vmName') '')).Trim()
-        $expectedFqdn = ([string](Get-PatchValue $VMRecord @('expectedFqdn') '')).Trim().TrimEnd('.')
-        $shortExpectedFqdn = $expectedFqdn
-        $dot = $shortExpectedFqdn.IndexOf('.')
-        if ($dot -gt 0) { $shortExpectedFqdn = $shortExpectedFqdn.Substring(0, $dot) }
-        $isLocal = [string]::Equals($machine, $vmName, [System.StringComparison]::OrdinalIgnoreCase) -or
-            [string]::Equals($machine, $shortExpectedFqdn, [System.StringComparison]::OrdinalIgnoreCase)
-    }
-    if ($isLocal) {
-        $scope = ([string](Get-PatchValue $VMRecord @('vmId') '')).Trim()
-        if ([string]::IsNullOrWhiteSpace($scope)) {
-            $scope = ([string](Get-PatchValue $VMRecord @('vmName') '')).Trim()
-        }
-        return $scope.ToLowerInvariant()
-    }
-    return ''
-}
-
-function Get-PatchGuestAccountKey {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]$RunState,
-        [Parameter(Mandatory = $true)]$GuestCredential,
-        [Parameter(Mandatory = $true)]$VMRecord
-    )
-
-    $runIdText = ([string](Get-PatchValue $RunState @('runId') '')).Trim()
-    if ([string]::IsNullOrWhiteSpace($runIdText)) { throw 'The run has no runId for guest account key generation.' }
-    $runId = $null
-    try { $runId = ([Guid]$runIdText).ToString('D') } catch { $runId = $runIdText.ToLowerInvariant() }
-    $userName = ([string](Get-PatchValue $GuestCredential @('UserName') '')).Trim().ToLowerInvariant()
-    if ([string]::IsNullOrWhiteSpace($userName)) { throw 'The guest credential has no user name for account key generation.' }
-    $scope = Get-PatchGuestAccountScope -VMRecord $VMRecord -GuestCredential $GuestCredential
-    $material = 'patch-guest-account-v1|' + $runId + '|' + $userName + '|' + $scope
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($material))
-    }
-    finally {
-        $sha.Dispose()
-    }
-    $hex = New-Object System.Text.StringBuilder
-    foreach ($byte in $digest) { [void]$hex.Append($byte.ToString('x2')) }
-    return 'sha256:' + $hex.ToString()
-}
-
-function Test-PatchGuestAccountSkipped {
-    param($RunState, $VMRecord, $GuestCredential)
-
-    $key = Get-PatchGuestAccountKey -RunState $RunState -GuestCredential $GuestCredential -VMRecord $VMRecord
-    $rejectedKey = [string](Get-PatchValue $VMRecord @('rejectedGuestAccountKey') '')
-    foreach ($entry in @(Get-PatchArray -Value (Get-PatchValue $RunState @('skippedGuestAccounts') @()))) {
-        $entryText = [string]$entry
-        if ([string]::Equals($entryText, $key, [System.StringComparison]::Ordinal) -or
-            (-not [string]::IsNullOrWhiteSpace($rejectedKey) -and [string]::Equals($entryText, $rejectedKey, [System.StringComparison]::Ordinal))) {
-            return $true
-        }
     }
     return $false
 }
@@ -1473,20 +1390,15 @@ function Add-PatchVmFailure {
         $VMRecord,
         [string]$VMName,
         [string]$Action,
-        [string]$ExceptionMessage,
-        $GuestCredential,
+        [System.Exception]$Exception,
         [ref]$RebootBarrier
     )
 
-    $message = Protect-PatchText $ExceptionMessage
-    $code = Get-PatchErrorCode -Message $message
+    $message = Protect-PatchText $Exception.Message
+    # Get-GuestContext raises InvalidCredentialException when the guest rejects the account;
+    # the GUI then offers Retry, Skip, or Stop (plan: step 1).
+    $code = if ($Exception -is [System.Security.Authentication.InvalidCredentialException]) { 'GuestCredentialRejected' } else { 'Failed' }
     Set-PatchValue -InputObject $VMRecord -Name 'status' -Value $code
-    if ($code -eq 'GuestCredentialRejected' -and $null -ne $GuestCredential) {
-        $rejectedKey = Get-PatchGuestAccountKey -RunState $RunState -GuestCredential $GuestCredential -VMRecord $VMRecord
-        $rejectedScope = Get-PatchGuestAccountScope -VMRecord $VMRecord -GuestCredential $GuestCredential
-        Set-PatchValue -InputObject $VMRecord -Name 'rejectedGuestAccountKey' -Value $rejectedKey
-        Set-PatchValue -InputObject $VMRecord -Name 'rejectedGuestAccountIsLocal' -Value ([bool](-not [string]::IsNullOrWhiteSpace([string]$rejectedScope)))
-    }
     if ($Action -eq 'Reboot') { $RebootBarrier.Value = $true }
     $vmErrors = @(Get-PatchArray -Value (Get-PatchValue $VMRecord @('errors') @()))
     $vmErrors += [pscustomobject]@{ code = $code; message = $message; step = $Action }
@@ -1545,7 +1457,6 @@ function Invoke-PatchAction {
         $server = Connect-PatchVCenter -ServerName $serverName -Credential $VCenterCredential -IgnoreVCenterCertificate:([bool](Get-PatchOption $run @('ignoreVCenterCertificate') $false))
 
         $rebootBarrier = $false
-        $rejectedAccountKeys = @{}
         $workLimit = 1
         if ($Action -eq 'Scan' -or $Action -eq 'Verify') {
             $workLimit = [int](Get-PatchOption $run @('scanConcurrency') 3)
@@ -1575,33 +1486,11 @@ function Invoke-PatchAction {
                 }
 
                 $vmName = [string](Get-PatchValue $vmRecord @('vmName') '')
-                if (Test-PatchGuestAccountSkipped -RunState $run -VMRecord $vmRecord -GuestCredential $GuestCredential) {
-                    Set-PatchValue -InputObject $vmRecord -Name 'status' -Value 'SkippedGuestAccount'
-                    Set-PatchValue -InputObject $vmRecord -Name 'errorLinks' -Value @('errors.log')
+                if ([string](Get-PatchValue $vmRecord @('status') '') -eq 'SkippedGuestAccount') {
                     Set-PatchValue -InputObject $vmRecord -Name 'lastProcessedAction' -Value $Action
                     Save-PatchDecision -RunPath $runFile -RunState $run
-                    Write-PatchEvent -RunPath $runFile -Message 'Skipped because this guest account is recorded as skipped for this VM.' -VMName $vmName -Step $Action -Level 'WARN'
-                    $resultRows += [pscustomobject]@{ vmName = $vmName; status = 'SkippedGuestAccount'; error = 'GuestCredentialSkipped' }
-                    continue
-                }
-                $priorStatus = [string](Get-PatchValue $vmRecord @('status') '')
-                $currentAccountKey = Get-PatchGuestAccountKey -RunState $run -GuestCredential $GuestCredential -VMRecord $vmRecord
-                $rejectedInThisAction = $rejectedAccountKeys.ContainsKey($currentAccountKey)
-                if ($priorStatus -eq 'GuestCredentialRejected' -or $priorStatus -eq 'GuestCredentialRejectedPendingDecision' -or $priorStatus -eq 'SkippedAccountPendingDecision' -or $rejectedInThisAction) {
-                    $pendingStatus = 'GuestCredentialRejectedPendingDecision'
-                    if ($priorStatus -eq 'SkippedAccountPendingDecision') { $pendingStatus = $priorStatus }
-                    if ($rejectedInThisAction) {
-                        Set-PatchValue -InputObject $vmRecord -Name 'rejectedGuestAccountKey' -Value $currentAccountKey
-                        $scope = Get-PatchGuestAccountScope -VMRecord $vmRecord -GuestCredential $GuestCredential
-                        Set-PatchValue -InputObject $vmRecord -Name 'rejectedGuestAccountIsLocal' -Value ([bool](-not [string]::IsNullOrWhiteSpace([string]$scope)))
-                        $pendingStatus = 'SkippedAccountPendingDecision'
-                    }
-                    Set-PatchValue -InputObject $vmRecord -Name 'status' -Value $pendingStatus
-                    Set-PatchValue -InputObject $vmRecord -Name 'errorLinks' -Value @('errors.log')
-                    Set-PatchValue -InputObject $vmRecord -Name 'lastProcessedAction' -Value $Action
-                    Save-PatchDecision -RunPath $runFile -RunState $run
-                    Write-PatchEvent -RunPath $runFile -Message 'Paused until the operator chooses Retry, Skip account, or Stop for the rejected guest account.' -VMName $vmName -Step $Action -Level 'WARN'
-                    $resultRows += [pscustomobject]@{ vmName = $vmName; status = $pendingStatus; error = 'GuestCredentialRejected' }
+                    Write-PatchEvent -RunPath $runFile -Message 'Skipped because the operator skipped the rejected guest account for this run.' -VMName $vmName -Step $Action -Level 'WARN'
+                    $resultRows += [pscustomobject]@{ vmName = $vmName; status = 'SkippedGuestAccount'; error = $null }
                     continue
                 }
                 if ($Action -eq 'Install' -and @(Get-PatchArray -Value (Get-PatchValue $vmRecord @('selectedUpdates') @())).Count -eq 0) {
@@ -1646,12 +1535,7 @@ function Invoke-PatchAction {
                     }
                 }
                 catch {
-                    $failureResult = Add-PatchVmFailure -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -ExceptionMessage $_.Exception.Message -GuestCredential $GuestCredential -RebootBarrier ([ref]$rebootBarrier)
-                    if ([string]::Equals([string](Get-PatchValue $failureResult @('status') ''), 'GuestCredentialRejected', [System.StringComparison]::OrdinalIgnoreCase)) {
-                        $rejectedKey = [string](Get-PatchValue $vmRecord @('rejectedGuestAccountKey') '')
-                        if (-not [string]::IsNullOrWhiteSpace($rejectedKey)) { $rejectedAccountKeys[$rejectedKey] = $true }
-                    }
-                    $resultRows += $failureResult
+                    $resultRows += Add-PatchVmFailure -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -Exception $_.Exception -RebootBarrier ([ref]$rebootBarrier)
                 }
             }
 
@@ -1664,18 +1548,13 @@ function Invoke-PatchAction {
                     $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -VmResult $vmResult -RebootBarrier ([ref]$rebootBarrier)
                 }
                 catch {
-                    $failureResult = Add-PatchVmFailure -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -ExceptionMessage $_.Exception.Message -GuestCredential $GuestCredential -RebootBarrier ([ref]$rebootBarrier)
-                    if ([string]::Equals([string](Get-PatchValue $failureResult @('status') ''), 'GuestCredentialRejected', [System.StringComparison]::OrdinalIgnoreCase)) {
-                        $rejectedKey = [string](Get-PatchValue $vmRecord @('rejectedGuestAccountKey') '')
-                        if (-not [string]::IsNullOrWhiteSpace($rejectedKey)) { $rejectedAccountKeys[$rejectedKey] = $true }
-                    }
-                    $resultRows += $failureResult
+                    $resultRows += Add-PatchVmFailure -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -Exception $_.Exception -RebootBarrier ([ref]$rebootBarrier)
                 }
             }
         }
 
-        $needsReview = @($resultRows | Where-Object { $_.status -eq 'NeedsReview' -or $_.status -eq 'PendingRebootConfirmation' -or $_.status -eq 'PendingRebootBarrier' -or $_.status -eq 'GuestCredentialRejectedPendingDecision' -or $_.status -eq 'SkippedAccountPendingDecision' }).Count -gt 0
-        $hasErrors = @($resultRows | Where-Object { $_.status -match 'Rejected|Failed|Blocked|Error|Mismatch' -or $_.status -eq 'PatchActionFailed' }).Count -gt 0
+        $needsReview = @($resultRows | Where-Object { $_.status -eq 'NeedsReview' -or $_.status -eq 'PendingRebootConfirmation' -or $_.status -eq 'PendingRebootBarrier' }).Count -gt 0
+        $hasErrors = @($resultRows | Where-Object { $_.status -in @('Failed', 'CompletedWithErrors', 'GuestCredentialRejected') }).Count -gt 0
         if ($needsReview) { Set-PatchValue -InputObject $run -Name 'status' -Value 'NeedsReview' }
         elseif ($hasErrors) { Set-PatchValue -InputObject $run -Name 'status' -Value 'CompletedWithErrors' }
         else { Set-PatchValue -InputObject $run -Name 'status' -Value 'Completed' }
