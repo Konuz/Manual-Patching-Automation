@@ -897,7 +897,7 @@ function Initialize-WizardUi {
     $vcButton.Add_Click({ Request-WizardCredential -Kind vCenter })
 
     $vmLabel = New-WizardLabel -Text 'VM entries' -X 10 -Y 48
-    $vmHint = New-WizardLabel -Text 'One per line: VM name, FQDN, or VM name|FQDN. Guest credentials are asked per domain.' -X 155 -Y 48 -Width 400 -Height 22
+    $vmHint = New-WizardLabel -Text 'One per line: VM name, FQDN, or VM name|FQDN. Guest credentials are asked per domain.' -X 155 -Y 48 -Width 710 -Height 22
     $vmHint.ForeColor = [System.Drawing.Color]::DimGray
     $vmText = New-Object System.Windows.Forms.TextBox
     $vmText.Location = New-Object System.Drawing.Point(155, 70)
