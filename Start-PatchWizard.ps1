@@ -181,28 +181,19 @@ function Set-WizardSettingsFromRun {
     param([Parameter(Mandatory = $true)]$RunState)
 
     $controls = $script:Wizard.Controls
-    $options = Get-PatchValue $RunState @('options') ([pscustomobject]@{})
-    $limits = Get-PatchValue $options @('limits') ([pscustomobject]@{})
-    $controls.VCenter.Text = [string](Get-PatchValue $RunState @('vCenter') '')
-    $controls.OutputRoot.Text = [string](Split-Path -Parent (Split-Path -Parent ([string](Get-PatchValue $RunState @('runPath') ''))))
-    if ([string]::IsNullOrWhiteSpace($controls.OutputRoot.Text)) {
-        $runDirectory = Split-Path -Parent ([string](Get-PatchValue $RunState @('runPath') ''))
-        $controls.OutputRoot.Text = Split-Path -Parent $runDirectory
-    }
-    $controls.ScanConcurrency.Text = [string](Get-PatchValue $options @('scanConcurrency') 3)
-    $controls.InstallConcurrency.Text = [string](Get-PatchValue $options @('installConcurrency') 3)
-    $controls.RebootBatch.Text = [string](Get-PatchValue $options @('rebootBatchSize') 1)
-    $controls.ScanLimit.Text = [string](Get-PatchValue $limits @('scanTimeoutMinutes') 30)
-    $controls.InstallLimit.Text = [string](Get-PatchValue $limits @('installTimeoutMinutes') 180)
-    $controls.RebootLimit.Text = [string](Get-PatchValue $limits @('rebootConfirmationTimeoutMinutes') 30)
-    $controls.IgnoreVCenter.Checked = [bool](Get-PatchValue $options @('ignoreVCenterCertificate') $false)
-    $controls.IgnoreEsxi.Checked = [bool](Get-PatchValue $options @('ignoreEsxiCertificatesForFileTransfers') $false)
-
-    $lines = @()
-    foreach ($vm in @(Get-PatchArray (Get-PatchValue $RunState @('vms') @()))) {
-        $lines += ('{0}|{1}' -f [string](Get-PatchValue $vm @('vmName') ''), [string](Get-PatchValue $vm @('expectedFqdn') ''))
-    }
-    $controls.VmEntries.Text = ($lines -join [Environment]::NewLine)
+    $options = $RunState.options
+    $controls.VCenter.Text = [string]$RunState.vCenter
+    # runPath is <output root>\<runId>\run.json
+    $controls.OutputRoot.Text = Split-Path -Parent (Split-Path -Parent ([string]$RunState.runPath))
+    $controls.ScanConcurrency.Text = [string]$options.scanConcurrency
+    $controls.InstallConcurrency.Text = [string]$options.installConcurrency
+    $controls.RebootBatch.Text = [string]$options.rebootBatchSize
+    $controls.ScanLimit.Text = [string]$options.limits.scanTimeoutMinutes
+    $controls.InstallLimit.Text = [string]$options.limits.installTimeoutMinutes
+    $controls.RebootLimit.Text = [string]$options.limits.rebootConfirmationTimeoutMinutes
+    $controls.IgnoreVCenter.Checked = [bool]$options.ignoreVCenterCertificate
+    $controls.IgnoreEsxi.Checked = [bool]$options.ignoreEsxiCertificatesForFileTransfers
+    $controls.VmEntries.Text = (@(Get-PatchArray $RunState.vms | ForEach-Object { '{0}|{1}' -f $_.vmName, $_.expectedFqdn }) -join [Environment]::NewLine)
 }
 
 function New-WizardRun {
@@ -255,42 +246,30 @@ function Resume-WizardRun {
     }
 
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
-    $dialog.Filter = 'Patch run (run.json)|run.json|JSON files (*.json)|*.json|All files (*.*)|*.*'
+    $dialog.Filter = 'Patch run (run.json)|run.json'
     $dialog.Title = 'Resume patch run'
-    $dialog.Multiselect = $false
     if ($dialog.ShowDialog($script:Wizard.Form) -ne [System.Windows.Forms.DialogResult]::OK) { return }
 
     try {
-        $runPath = $dialog.FileName
-        $state = Read-PatchRun -RunPath $runPath
-        Write-PatchSummary -RunPath $runPath -RunState $state
+        $state = Read-PatchRun -RunPath $dialog.FileName
+        Write-PatchSummary -RunPath $dialog.FileName -RunState $state
         $script:Wizard.RunState = $state
-        $script:Wizard.RunPath = $runPath
+        $script:Wizard.RunPath = $dialog.FileName
+        # Credentials are never saved; they are asked for again when the next action starts.
         $script:Wizard.VCenterCredential = $null
         $script:Wizard.GuestCredential = $null
         Set-WizardSettingsFromRun -RunState $state
         $script:Wizard.Controls.OpenLogs.Enabled = $true
         $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}' -f $script:Wizard.RunPath)
-        Set-WizardStatus -Message 'Run loaded. Credentials are required again for a resumed run.'
-
-        Request-WizardCredential -Kind vCenter
-        if ($null -eq $script:Wizard.VCenterCredential) { throw 'Resume cancelled because the vCenter credential was not supplied.' }
         Refresh-WizardVmGrid
         Refresh-WizardSelectionGrid
         Update-WizardStepState
+        Set-WizardStatus -Message 'Run loaded.'
+
+        # An interrupted action continues by observing the steps it already started (plan: Resume run).
         $currentAction = [string](Get-PatchValue $state @('currentAction') '')
-        $credentialDecision = Resolve-WizardCredentialRejection -Action $currentAction
-        if ($credentialDecision -eq 'None') {
-            Request-WizardCredential -Kind guest
-            if ($null -eq $script:Wizard.GuestCredential) { throw 'Resume cancelled because the guest credential was not supplied.' }
-        }
-        if ($credentialDecision -eq 'None' -or $credentialDecision -eq 'Retry') {
-            Set-WizardStatus -Message 'Run resumed in memory. Credentials are not written to run.json.'
-        }
-        if ($credentialDecision -eq 'Retry' -and $currentAction -in @('Scan', 'Install', 'Reboot', 'Verify')) {
-            Start-WizardAction -Action $currentAction -ApprovalAlreadyGiven
-        }
-        elseif ($credentialDecision -eq 'None' -and [string](Get-PatchValue $state @('status') '') -eq 'Running' -and $currentAction -in @('Scan', 'Install', 'Reboot', 'Verify')) {
+        if ([string]$state.status -eq 'Running' -and $currentAction -in @('Scan', 'Install', 'Reboot', 'Verify')) {
+            Set-WizardStatus -Message ('{0} was interrupted; it continues without starting finished or running steps again.' -f $currentAction)
             Start-WizardAction -Action $currentAction -ApprovalAlreadyGiven
         }
     }
@@ -322,10 +301,6 @@ function Get-WizardUpdateRowsFromState {
     foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
         $vmName = [string](Get-PatchValue $vm @('vmName') '')
         $updates = @(Get-PatchArray (Get-PatchValue $vm @('availableUpdates') @()))
-        if ($updates.Count -eq 0) {
-            $agentStatus = Get-PatchValue $vm @('agentStatus') $null
-            $updates = @(Get-PatchArray (Get-PatchValue $agentStatus @('updates') @()))
-        }
         $savedSelection = [bool](Get-PatchValue $vm @('selectionSaved') $false)
         $savedKeys = @{}
         foreach ($selectedUpdate in @(Get-PatchArray (Get-PatchValue $vm @('selectedUpdates') @()))) {
@@ -392,9 +367,6 @@ function Refresh-WizardVmGrid {
         for ($i = 0; $i -lt $vms.Count; $i++) {
             $vm = $vms[$i]
             $updates = @(Get-PatchArray (Get-PatchValue $vm @('availableUpdates') @()))
-            if ($updates.Count -eq 0) {
-                $updates = @(Get-PatchArray (Get-PatchValue (Get-PatchValue $vm @('agentStatus') $null) @('updates') @()))
-            }
             $reboot = Get-PatchValue $vm @('reboot') $null
             $grid.Rows[$i].Cells[0].Value = [string](Get-PatchValue $vm @('vmName') '')
             $grid.Rows[$i].Cells[1].Value = [string](Get-PatchValue $vm @('expectedFqdn') '')
@@ -428,20 +400,6 @@ function Refresh-WizardRebootGrid {
         $grid.Rows[$index].Tag = $vm
     }
     $script:Wizard.Controls.RebootButton.Enabled = ($grid.Rows.Count -gt 0 -and $null -eq $script:Wizard.ActivePowerShell)
-}
-
-function Sync-WizardAvailableUpdates {
-    if ($null -eq $script:Wizard.RunState) { return }
-    $changed = $false
-    foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
-        $agentStatus = Get-PatchValue $vm @('agentStatus') $null
-        $updates = @(Get-PatchArray (Get-PatchValue $agentStatus @('updates') @()))
-        if ($updates.Count -gt 0) {
-            Set-PatchValue -InputObject $vm -Name 'availableUpdates' -Value @($updates)
-            $changed = $true
-        }
-    }
-    if ($changed) { Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null }
 }
 
 function Get-WizardUnresolvedMutatingStep {
@@ -506,16 +464,6 @@ function Refresh-WizardRunLog {
     catch {
         $script:Wizard.LastRunReadError = $_.Exception.Message
     }
-}
-
-function Get-WizardActionResult {
-    param($Output)
-    foreach ($item in @($Output | Where-Object { $null -ne $_ })) {
-        if ($null -ne $item.PSObject.Properties['action'] -or $null -ne $item.PSObject.Properties['status']) {
-            $candidate = $item
-        }
-    }
-    return $candidate
 }
 
 function Show-WizardCredentialDecision {
@@ -675,11 +623,10 @@ function Complete-WizardAction {
     $script:Wizard.ActivePowerShell = $null
     $script:Wizard.ActiveAsyncResult = $null
     $script:Wizard.ActiveAction = $null
-    $result = Get-WizardActionResult -Output $output
+    $result = @($output)[-1]
 
     try {
         $script:Wizard.RunState = Read-PatchRun -RunPath $script:Wizard.RunPath
-        Sync-WizardAvailableUpdates
     }
     catch {
         Set-WizardStatus -Message ('Action finished, but run state could not be read: {0}' -f $_.Exception.Message)
