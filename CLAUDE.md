@@ -30,7 +30,7 @@ The guest agent can be run locally in read-only Scan mode to validate it (writes
 & .\guest\PatchAgent.ps1 -Mode Scan -RunId ([guid]::NewGuid()) -StepId ([guid]::NewGuid())
 ```
 
-Git: the `.git` folder is owned by another Windows account, so plain `git` fails with "dubious ownership". Use `git -c safe.directory="F:/Apki/Patching Automation v2" ...` (do not change global config unless asked). Local `master` tracks `origin/main`.
+Git: the `.git` folder is owned by another Windows account, so plain `git` fails with "dubious ownership". Use `git -c safe.directory="F:/Apki/Patching Automation v2" ...` (do not change global config unless asked). Local `master` tracks `origin/main`; push with `git push origin HEAD:main` (plain `git push` fails because the branch names differ).
 
 ## Architecture
 
