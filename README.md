@@ -90,5 +90,6 @@ Before production use:
 4. Review per-update results and approve Reboot only when the wizard reports fresh pending reboot evidence.
 5. Complete Verify and inspect the files written for the run, including `run.log`, any `errors.log`, per-step `status-*.json` and `agent-*.log`, `summary.md`, and `summary.csv`.
 6. Repeat the pilot after closing the GUI during Install and after reboot dispatch; use Resume run and confirm that the existing step is observed instead of started again.
+7. Enter a wrong guest password once and confirm that the Retry / Skip these VMs / Stop dialog appears.
 
 Do not use a production VM for the first pilot. Cluster members and VMs with an unknown cluster state remain blocked for install and reboot.
