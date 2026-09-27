@@ -1197,7 +1197,7 @@ function Invoke-PatchRebootConfirmation {
             if ($null -ne $failedResult) { return $failedResult }
             $hasRebootEvidence = $hasRebootEvidence -or (Test-PatchRebootRequestStatus -Status (Get-PatchValue $Step @('agentStatus') $null) -RunId $runIdText -StepId $stepIdText)
             if ($hasRebootEvidence -and (Get-PatchToolsRunning -Context $context)) {
-                $currentBoot = [string](Read-GuestBootTime -Context $context)
+                $currentBoot = [string](Read-GuestBootTime -Context $context -IgnoreEsxiCertificate ([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)))
                 $currentDate = $null
                 try { $currentDate = [datetime]::Parse($currentBoot).ToUniversalTime() } catch { }
                 if ($null -ne $baselineDate -and $null -ne $currentDate -and $currentDate -gt $baselineDate) {
@@ -1298,7 +1298,7 @@ function Invoke-PatchRebootStep {
     $step = Get-PatchStep -VMRecord $VMRecord -Action 'Reboot' -Round $round
     $baseline = [string](Get-PatchValue $step @('baselineBootTime') '')
     if ([string]::IsNullOrWhiteSpace($baseline)) {
-        $baseline = [string](Read-GuestBootTime -Context $Context)
+        $baseline = [string](Read-GuestBootTime -Context $Context -IgnoreEsxiCertificate ([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)))
         if ([string]::IsNullOrWhiteSpace($baseline)) { throw 'A baseline guest boot time could not be read.' }
         Set-PatchValue -InputObject $step -Name 'baselineBootTime' -Value $baseline
         Save-PatchDecision -RunPath $RunPath -RunState $RunState

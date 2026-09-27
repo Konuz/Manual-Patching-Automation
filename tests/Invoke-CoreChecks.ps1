@@ -498,7 +498,7 @@ Write-Output ('result={0};stop={1}' -f $result.status, $saved.stopReason)
 
     function Read-GuestBootTime {
         [CmdletBinding()]
-        param([object]$Context)
+        param([object]$Context, [bool]$IgnoreEsxiCertificate)
 
         $script:CoreCheckBootTimeCalls++
         return $script:CoreCheckBootTime
@@ -1226,7 +1226,7 @@ Write-Output ('result={0};stop={1}' -f $result.status, $saved.stopReason)
 
         function Read-GuestBootTime {
             [CmdletBinding()]
-            param([object]$Context)
+            param([object]$Context, [bool]$IgnoreEsxiCertificate)
 
             $vmName = [string]$Context.VM.Name
             if (-not $script:CoreCheckRebootBootReads.ContainsKey($vmName)) {

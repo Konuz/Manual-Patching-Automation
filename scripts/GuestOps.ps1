@@ -90,8 +90,7 @@ function Get-PatchVM {
         throw ('VMware Tools are not running on {0}. ToolsRunningStatus: {1}' -f $Name, $guest.ToolsRunningStatus)
     }
 
-    # Keep the exact VIServer object with the VM so later Invoke-VMScript calls
-    # cannot fall back to a global/default PowerCLI session.
+    # Keep the exact VIServer object with the VM for Guest Operations.
     $vm | Add-Member -MemberType NoteProperty -Name PatchServer -Value $Server -Force | Out-Null
     return $vm
 }
@@ -471,23 +470,37 @@ function Read-GuestStatus {
 function Read-GuestBootTime {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)][ValidateNotNull()]$Context
+        [Parameter(Mandatory = $true)][ValidateNotNull()]$Context,
+        [bool]$IgnoreEsxiCertificate = $false
     )
 
-    $toolsRunningStatus = [string]$Context.VM.ExtensionData.Guest.ToolsRunningStatus
-    if ($toolsRunningStatus -ne 'guestToolsRunning') {
-        throw ('VMware Tools are not running on {0}.' -f $Context.VM.Name)
+    # Same channels as the agent: vCenter starts a guest process, curl.exe downloads its file.
+    # (Invoke-VMScript is avoided: its ESXi transfer follows the vCenter certificate option.)
+    $guestPath = Join-Path (Join-Path $Context.ProgramData 'WindowsPatchWizard') 'boottime.txt'
+    $command = '$p = ''{0}''; New-Item -ItemType Directory -Force -Path (Split-Path $p) | Out-Null; (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString(''o'') | Set-Content -Path $p -Encoding ASCII' -f $guestPath
+    $programSpec = New-Object VMware.Vim.GuestProgramSpec
+    $programSpec.ProgramPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+    $programSpec.Arguments = '-NoProfile -NonInteractive -Command "{0}"' -f $command
+    $processId = [int64]$Context.ProcessManager.StartProgramInGuest($Context.VMView.MoRef, $Context.GuestAuth, $programSpec)
+
+    $process = $null
+    for ($second = 0; $second -lt 60; $second++) {
+        $process = @(Get-GuestProcess -Context $Context -ProcessId $processId)[0]
+        if ($null -ne $process -and $null -ne $process.EndTime) { break }
+        Start-Sleep -Seconds 1
     }
-    if ($null -eq $Context.Server -or $null -eq $Context.GuestCredential) {
-        throw 'The Guest Operations context has no vCenter server or guest credential.'
+    if ($null -eq $process -or $null -eq $process.EndTime -or $process.ExitCode -ne 0) {
+        throw 'The guest boot time query did not finish successfully.'
     }
 
-    $scriptText = '$os = Get-WmiObject -Class Win32_OperatingSystem | Select-Object -First 1; if ($null -eq $os) { throw "Win32_OperatingSystem was not found." }; ([System.Management.ManagementDateTimeConverter]::ToDateTime([string]$os.LastBootUpTime)).ToUniversalTime().ToString("o")'
-    $scriptResult = Invoke-VMScript -VM $Context.VM -GuestCredential $Context.GuestCredential -Server $Context.Server -ScriptType PowerShell -ScriptText $scriptText -ErrorAction Stop
-    $outputLines = @(([string]$scriptResult.ScriptOutput) -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if ($outputLines.Count -eq 0) {
-        throw 'The guest boot time query returned no value.'
+    $localPath = [System.IO.Path]::GetTempFileName()
+    try {
+        Receive-GuestFile -Context $Context -GuestPath $guestPath -LocalPath $localPath -IgnoreEsxiCertificate $IgnoreEsxiCertificate | Out-Null
+        $text = (Get-Content -LiteralPath $localPath -Raw).Trim()
     }
-    $bootTime = [datetime]::Parse($outputLines[$outputLines.Count - 1].Trim(), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+    finally {
+        Remove-Item -LiteralPath $localPath -Force -ErrorAction SilentlyContinue
+    }
+    $bootTime = [datetime]::Parse($text, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
     return $bootTime.ToUniversalTime().ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
 }
