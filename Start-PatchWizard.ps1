@@ -808,6 +808,7 @@ function Complete-WizardAction {
     Refresh-WizardVmGrid
     Refresh-WizardSelectionGrid
     Refresh-WizardRebootGrid
+    Refresh-WizardRunLog
     Update-WizardProgress
     Update-WizardStepState
     if ($credentialDecision -in @('Skip', 'Stop', 'Cancel')) { return }
@@ -874,7 +875,9 @@ function Finish-WizardRun {
 }
 
 function Refresh-WizardUi {
-    if ($null -eq $script:Wizard.RunState -or [string]::IsNullOrWhiteSpace([string]$script:Wizard.RunPath)) { return }
+    # Only a running background action changes run.json. While idle, the in-memory state is
+    # authoritative; re-reading it here would discard changes made behind an open dialog.
+    if ($null -eq $script:Wizard.ActivePowerShell) { return }
     try {
         $script:Wizard.RunState = Read-PatchRun -RunPath $script:Wizard.RunPath
         $script:Wizard.LastRunReadError = ''
