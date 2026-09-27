@@ -51,6 +51,9 @@ function Get-GuestContext { param($VM, $GuestCredential) $script:GuestContext }
 function Send-GuestFile { param($Context, [string]$LocalPath, [string]$GuestPath, [bool]$IgnoreEsxiCertificate) $script:EsxiFlags += $IgnoreEsxiCertificate }
 function Receive-GuestFile { param($Context, [string]$GuestPath, [string]$LocalPath, [bool]$IgnoreEsxiCertificate) $script:EsxiFlags += $IgnoreEsxiCertificate }
 function Start-GuestAgent { param($Context, [string]$GuestAgentPath, [string]$Mode, [Guid]$RunId, [Guid]$StepId, [string]$SelectionPath) $script:AgentStarts++; 1000 }
+# The first read is the baseline before the reboot; later reads return a newer boot time.
+$script:BootReads = 0
+function Read-GuestBootTime { param($Context, [bool]$IgnoreEsxiCertificate) $script:BootReads++; [datetime]::UtcNow.AddMinutes($script:BootReads).ToString('o') }
 function Read-GuestStatus {
     param($Context, [Guid]$RunId, [Guid]$StepId, [string]$ExpectedMode, [string]$LocalPath, [bool]$IgnoreEsxiCertificate)
     [pscustomobject]@{
@@ -112,18 +115,21 @@ try {
     }
 
     Invoke-Check 'A resumed install or reboot observes the started step instead of starting it again' {
+        $script:VmLookup = @(New-TestVm 'vm-1')
         foreach ($action in @('Install', 'Reboot')) {
             $script:AgentStarts = 0
+            $script:BootReads = 0
             $path = (New-TestRun "resume-$action").runPath
             $run = Read-PatchRun $path
             Set-PatchValue $run.vms[0] 'selectedUpdates' @([pscustomobject]@{ updateId = 'KB-1'; revisionNumber = 1 })
+            Set-PatchValue $run.vms[0] 'agentStatus' ([pscustomobject]@{ cluster = [pscustomobject]@{ membership = 'NotMember' } })
             Write-PatchRun -RunPath $path -RunState $run | Out-Null
-            # First start, then a "resume" from the saved run.json.
-            [void](Invoke-PatchAgentStep -Action $action -RunPath $path -RunState $run -VMRecord $run.vms[0] -VM $null -Context $script:GuestContext -TimeoutMinutes 1 -StartOnly)
+            # Start, then "close the GUI" and resume from the saved run.json.
+            [void](Invoke-PatchVmAction -Action $action -RunPath $path -RunState $run -VMRecord $run.vms[0] -Server 's' -GuestCredential $credential -StartOnly)
             $resumed = Read-PatchRun $path
-            $result = Invoke-PatchAgentStep -Action $action -RunPath $path -RunState $resumed -VMRecord $resumed.vms[0] -VM $null -Context $script:GuestContext -TimeoutMinutes 1
+            $result = Invoke-PatchVmAction -Action $action -RunPath $path -RunState $resumed -VMRecord $resumed.vms[0] -Server 's' -GuestCredential $credential
             Assert ($script:AgentStarts -eq 1) "$action started the guest agent $($script:AgentStarts) times."
-            Assert ($result.status -in @('Completed', 'RebootRequested')) "$action did not observe the terminal result: $($result.status)"
+            Assert ($result.status -in @('Completed', 'Confirmed')) "$action did not observe the final result: $($result.status) $($result.error)"
         }
     }
 

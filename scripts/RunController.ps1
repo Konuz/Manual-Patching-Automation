@@ -480,78 +480,14 @@ function Save-PatchDecision {
     Write-PatchRun -RunPath $RunPath -RunState $RunState | Out-Null
 }
 
-function Get-PatchStatusFinishedAt {
-    param($Status)
-    $text = [string](Get-PatchValue $Status @('finishedAt') '')
-    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
-    try { return ([datetime]::Parse($text)).ToUniversalTime() } catch { return $null }
-}
-
-function Test-PatchStatusIdentity {
-    param($Status, [string]$RunId, [string]$StepId, [string]$Mode)
-    if ($null -eq $Status) { return $false }
-    if (-not [string]::Equals([string](Get-PatchValue $Status @('runId') ''), $RunId, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
-    if (-not [string]::Equals([string](Get-PatchValue $Status @('stepId') ''), $StepId, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
-    if (-not [string]::Equals([string](Get-PatchValue $Status @('mode') ''), $Mode, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
-    return ($null -ne (Get-PatchStatusFinishedAt -Status $Status))
-}
-
-function Test-PatchCompletedStatus {
-    param($Status, [string]$RunId, [string]$StepId, [string]$Mode)
-    if (-not (Test-PatchStatusIdentity -Status $Status -RunId $RunId -StepId $StepId -Mode $Mode)) { return $false }
-    return [string]::Equals([string](Get-PatchValue $Status @('status') ''), 'Completed', [System.StringComparison]::OrdinalIgnoreCase)
-}
-
-function Test-PatchFailedStatus {
-    param($Status, [string]$RunId, [string]$StepId, [string]$Mode)
-    if (-not (Test-PatchStatusIdentity -Status $Status -RunId $RunId -StepId $StepId -Mode $Mode)) { return $false }
-    return [string]::Equals([string](Get-PatchValue $Status @('status') ''), 'Failed', [System.StringComparison]::OrdinalIgnoreCase)
-}
-
-function Test-PatchRebootRequestStatus {
-    param($Status, [string]$RunId, [string]$StepId)
-    if (-not (Test-PatchStatusIdentity -Status $Status -RunId $RunId -StepId $StepId -Mode 'Reboot')) { return $false }
-    return [string]::Equals([string](Get-PatchValue $Status @('status') ''), 'RebootRequested', [System.StringComparison]::OrdinalIgnoreCase)
-}
-
-function Get-PatchRebootFailureResult {
-    param($Step, [string]$RunId, [string]$StepId)
-
-    $agentStatus = Get-PatchValue $Step @('agentStatus') $null
-    if (-not (Test-PatchFailedStatus -Status $agentStatus -RunId $RunId -StepId $StepId -Mode 'Reboot')) { return $null }
-    $errorMessage = [string](Get-PatchValue $Step @('error') '')
-    if ([string]::IsNullOrWhiteSpace($errorMessage)) {
-        $errorMessage = [string](Get-PatchValue $agentStatus @('error', 'outcome') 'Guest agent failed.')
-    }
-    if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = 'Guest agent failed.' }
-    return [pscustomobject]@{ status = 'Failed'; step = $Step; agentStatus = $agentStatus; error = $errorMessage }
-}
-
 function Test-PatchMutatingStepReconciled {
-    param($Step, [string]$RunId)
-
+    # A started install or reboot is settled only by its final result or by the operator's review
+    # (plan: an unclear result needs manual reconciliation before the next installation).
+    param($Step)
     if (-not [bool](Get-PatchValue $Step @('startAttempted') $false)) { return $true }
-    $stepId = [string](Get-PatchValue $Step @('stepId') '')
-    $action = [string](Get-PatchValue $Step @('action') '')
     $status = [string](Get-PatchValue $Step @('status') '')
-    $agentStatus = Get-PatchValue $Step @('agentStatus') $null
-    # The operator checked the guest manually and marked the step as reviewed.
-    if ($status -eq 'Reviewed') { return $true }
-
-    if ([string]::Equals($action, 'Reboot', [System.StringComparison]::OrdinalIgnoreCase)) {
-        if (-not [string]::Equals($status, 'Confirmed', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
-        return (Test-PatchRebootRequestStatus -Status $agentStatus -RunId $RunId -StepId $stepId)
-    }
-    if (-not [string]::Equals($action, 'Install', [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
-
-    if ([string]::Equals($status, 'Completed', [System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals($status, 'CompletedWithErrors', [System.StringComparison]::OrdinalIgnoreCase)) {
-        return (Test-PatchCompletedStatus -Status $agentStatus -RunId $RunId -StepId $stepId -Mode 'Install')
-    }
-    if ([string]::Equals($status, 'Failed', [System.StringComparison]::OrdinalIgnoreCase)) {
-        return (Test-PatchFailedStatus -Status $agentStatus -RunId $RunId -StepId $stepId -Mode 'Install')
-    }
-    return $false
+    if ([string](Get-PatchValue $Step @('action') '') -eq 'Reboot') { return ($status -in @('Confirmed', 'Reviewed')) }
+    return ($status -in @('Completed', 'CompletedWithErrors', 'Failed', 'Reviewed'))
 }
 
 function Get-PatchMutatingStepBlocker {
@@ -569,7 +505,7 @@ function Get-PatchMutatingStepBlocker {
             [string]::Equals([string](Get-PatchValue $step @('stepId') ''), $currentStepId, [System.StringComparison]::OrdinalIgnoreCase)) {
             continue
         }
-        if (-not (Test-PatchMutatingStepReconciled -Step $step -RunId $runId)) { return $step }
+        if (-not (Test-PatchMutatingStepReconciled -Step $step)) { return $step }
     }
     return $null
 }
@@ -651,77 +587,53 @@ function Update-PatchVmFromAgentStatus {
 }
 
 function Wait-PatchAgent {
-    param(
-        [Parameter(Mandatory = $true)]$Context,
-        [Parameter(Mandatory = $true)]$RunState,
-        [Parameter(Mandatory = $true)]$VMRecord,
-        [Parameter(Mandatory = $true)]$Step,
-        [Parameter(Mandatory = $true)][string]$RunPath,
-        [Parameter(Mandatory = $true)][int]$TimeoutMinutes
-    )
+    # Waits for the agent's final status.json. Read-GuestStatus accepts a final status only when its
+    # runId, stepId and mode match this step and finishedAt is set; a missing process alone is not enough.
+    param($Context, $RunState, $VMRecord, $Step, [string]$RunPath, [int]$TimeoutMinutes)
 
-    $runId = [Guid](Get-PatchValue $RunState @('runId') '')
-    $stepId = [Guid](Get-PatchValue $Step @('stepId') '')
     $mode = [string](Get-PatchValue $Step @('agentMode') '')
-    $paths = Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step
-    $deadlineText = [string](Get-PatchValue $Step @('deadlineAt') '')
-    $deadline = $null
-    if (-not [string]::IsNullOrWhiteSpace($deadlineText)) {
-        try { $deadline = [datetime]::Parse($deadlineText).ToUniversalTime() } catch { $deadline = $null }
-    }
-    if ($null -eq $deadline) {
-        $startedText = [string](Get-PatchValue $Step @('startedAt') '')
-        $startedAt = $null
-        if (-not [string]::IsNullOrWhiteSpace($startedText)) {
-            try { $startedAt = [datetime]::Parse($startedText).ToUniversalTime() } catch { $startedAt = $null }
-        }
-        if ($null -eq $startedAt) { $startedAt = (Get-Date).ToUniversalTime() }
-        $deadline = $startedAt.AddMinutes([math]::Max(1, $TimeoutMinutes))
-        Set-PatchValue -InputObject $Step -Name 'deadlineAt' -Value $deadline.ToString('o')
+    $localStatusPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step).status
+    $ignoreEsxi = [bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)
+    # The deadline is saved with the step, so a resumed run keeps the original limit.
+    if ([string]::IsNullOrWhiteSpace([string](Get-PatchValue $Step @('deadlineAt') ''))) {
+        $startedAt = [datetime]::Parse([string](Get-PatchValue $Step @('startedAt') (Get-PatchUtcNow))).ToUniversalTime()
+        Set-PatchValue -InputObject $Step -Name 'deadlineAt' -Value $startedAt.AddMinutes($TimeoutMinutes).ToString('o')
         Save-PatchDecision -RunPath $RunPath -RunState $RunState
     }
+    $deadline = [datetime]::Parse([string]$Step.deadlineAt).ToUniversalTime()
+
     $lastError = $null
-    $firstPoll = $true
-    while ($firstPoll -or (Get-Date).ToUniversalTime() -lt $deadline) {
-        $firstPoll = $false
-        $status = $null
+    while ($true) {
         try {
-            $status = Read-GuestStatus -Context $Context -RunId $runId -StepId $stepId -ExpectedMode $mode -LocalPath $paths.status -IgnoreEsxiCertificate ([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false))
+            $status = Read-GuestStatus -Context $Context -RunId $RunState.runId -StepId $Step.stepId -ExpectedMode $mode -LocalPath $localStatusPath -IgnoreEsxiCertificate $ignoreEsxi
+            $state = [string](Get-PatchValue $status @('status') '')
+            if ($state -eq 'Completed') {
+                if ([string](Get-PatchValue $status @('outcome') '') -eq 'InstallSucceededWithErrors') {
+                    return [pscustomobject]@{ status = 'CompletedWithErrors'; agentStatus = $status; error = 'The guest agent completed installation with per-update errors.' }
+                }
+                return [pscustomobject]@{ status = 'Completed'; agentStatus = $status; error = $null }
+            }
+            if ($state -eq 'Failed') {
+                return [pscustomobject]@{ status = 'Failed'; agentStatus = $status; error = [string](Get-PatchValue $status @('error') 'The guest agent failed.') }
+            }
+            # The process ended without ever writing status.json: the agent did not run.
+            $processId = Get-PatchValue $Step @('processId') $null
+            if ($null -eq $status -and $null -ne $processId) {
+                $process = @(Get-GuestProcess -Context $Context -ProcessId ([long]$processId))[0]
+                if ($null -ne $process -and $null -ne $process.EndTime) {
+                    return [pscustomobject]@{ status = 'NeedsReview'; agentStatus = $null; error = 'The guest agent process ended without writing status.json.' }
+                }
+            }
         }
         catch {
-            $lastError = $_.Exception.Message
+            $lastError = Protect-PatchText $_.Exception.Message
         }
-
-        if (Test-PatchCompletedStatus -Status $status -RunId $runId.ToString('D') -StepId $stepId.ToString('D') -Mode $mode) {
-            $outcome = [string](Get-PatchValue $status @('outcome') '')
-            if ($mode -eq 'Install' -and [string]::Equals($outcome, 'InstallSucceededWithErrors', [System.StringComparison]::OrdinalIgnoreCase)) {
-                return [pscustomobject]@{ status = 'CompletedWithErrors'; agentStatus = $status; error = 'The guest agent completed installation with per-update errors.' }
-            }
-            return [pscustomobject]@{ status = 'Completed'; agentStatus = $status; error = $null }
-        }
-        if (Test-PatchFailedStatus -Status $status -RunId $runId.ToString('D') -StepId $stepId.ToString('D') -Mode $mode) {
-            return [pscustomobject]@{ status = 'Failed'; agentStatus = $status; error = [string](Get-PatchValue $status @('error', 'outcome') 'Guest agent failed.') }
-        }
-        if ($mode -eq 'Reboot' -and (Test-PatchRebootRequestStatus -Status $status -RunId $runId.ToString('D') -StepId $stepId.ToString('D'))) {
-            return [pscustomobject]@{ status = 'RebootRequested'; agentStatus = $status; error = $null }
-        }
-
-        $process = @()
-        $pidValue = Get-PatchValue $Step @('processId') $null
-        if ($null -ne $pidValue) {
-            try { $process = @(Get-GuestProcess -Context $Context -Pid ([long]$pidValue)) } catch { $lastError = $_.Exception.Message }
-        }
-        $terminalProcess = @($process | Where-Object { $null -ne (Get-PatchValue $_ @('ExitCode') $null) -or $null -ne (Get-PatchValue $_ @('EndTime') $null) })
-        if ($terminalProcess.Count -gt 0 -and $null -eq $status) {
-            return [pscustomobject]@{ status = 'NeedsReview'; agentStatus = $null; error = 'The guest process ended without matching terminal status.json evidence.' }
-        }
-
         if ((Get-Date).ToUniversalTime() -ge $deadline) { break }
         Start-Sleep -Seconds 10
     }
-    $timeoutMessage = 'The guest agent did not produce matching terminal status evidence before the timeout.'
-    if (-not [string]::IsNullOrWhiteSpace([string]$lastError)) { $timeoutMessage += ' Last read error: ' + (Protect-PatchText $lastError) }
-    return [pscustomobject]@{ status = 'NeedsReview'; agentStatus = $null; error = $timeoutMessage }
+    $message = 'The guest agent did not report a final result before the time limit.'
+    if ($null -ne $lastError) { $message += ' Last read error: ' + $lastError }
+    return [pscustomobject]@{ status = 'NeedsReview'; agentStatus = $null; error = $message }
 }
 
 function Invoke-PatchAgentStep {
@@ -730,57 +642,33 @@ function Invoke-PatchAgentStep {
         [string]$RunPath,
         $RunState,
         $VMRecord,
-        $VM,
         $Context,
         [int]$TimeoutMinutes,
         [switch]$StartOnly
     )
 
-    $round = [int](Get-PatchValue $VMRecord @('currentRound') (Get-PatchValue $RunState @('currentRound') 1))
+    $round = [int](Get-PatchValue $VMRecord @('currentRound') 1)
     $step = Get-PatchStep -VMRecord $VMRecord -Action $Action -Round $round
-    $defaultAgentMode = $Action
-    if ($Action -eq 'Verify') { $defaultAgentMode = 'Scan' }
-    $readOnlyAction = $Action -eq 'Scan' -or $Action -eq 'Verify'
-    $agentMode = [string](Get-PatchValue $step @('agentMode') $defaultAgentMode)
-    $terminalStatus = [string](Get-PatchValue $step @('status') '')
-    $terminal = $terminalStatus -eq 'Completed' -or $terminalStatus -eq 'CompletedWithErrors' -or $terminalStatus -eq 'Reviewed' -or ($readOnlyAction -and $terminalStatus -eq 'Failed')
-    $stepReconciled = Test-PatchMutatingStepReconciled -Step $step -RunId ([string](Get-PatchValue $RunState @('runId') ''))
-    if ($terminal -and $stepReconciled) {
-        $hasTerminalAgentEvidence = Test-PatchStatusIdentity -Status (Get-PatchValue $step @('agentStatus') $null) -RunId ([string](Get-PatchValue $RunState @('runId') '')) -StepId ([string](Get-PatchValue $step @('stepId') '')) -Mode $agentMode
-        if ($readOnlyAction -and $hasTerminalAgentEvidence) {
-            $steps = @(Get-PatchArray -Value (Get-PatchValue $VMRecord @('steps') @()))
-            $newStep = New-PatchStep -Action $Action -AgentMode $defaultAgentMode -Round $round
-            Set-PatchValue -InputObject $VMRecord -Name 'steps' -Value @($steps + $newStep)
-            $step = $newStep
-            $agentMode = $defaultAgentMode
-            $terminalStatus = ''
-            $terminal = $false
-            $stepReconciled = $false
+    $agentMode = [string](Get-PatchValue $step @('agentMode') '')
+    $stepStatus = [string](Get-PatchValue $step @('status') '')
+    if ($stepStatus -in @('Completed', 'CompletedWithErrors', 'Failed', 'Reviewed')) {
+        # A finished install is never repeated in the same round; a new round starts a new step.
+        if ($Action -eq 'Install') {
+            return [pscustomobject]@{ status = $stepStatus; step = $step; agentStatus = Get-PatchValue $step @('agentStatus') $null; error = Get-PatchValue $step @('error') $null }
         }
-        elseif (-not ($readOnlyAction -and $terminalStatus -eq 'Failed')) {
-            $terminalError = if ($terminalStatus -eq 'CompletedWithErrors') { [string](Get-PatchValue $step @('error') 'The guest agent completed with errors.') } else { $null }
-            return [pscustomobject]@{ status = $terminalStatus; step = $step; agentStatus = Get-PatchValue $step @('agentStatus') $null; error = $terminalError }
-        }
-    }
-    if ($terminal -and -not [bool](Get-PatchValue $step @('startAttempted') $false)) {
-        return [pscustomobject]@{
-            status = 'NeedsReview'
-            step = $step
-            agentStatus = Get-PatchValue $step @('agentStatus') $null
-            error = 'The persisted mutating step has a terminal status without matching terminal agent evidence.'
-        }
+        # Scan and Verify are read-only: repeating them runs a fresh scan.
+        $step = New-PatchStep -Action $Action -AgentMode $agentMode -Round $round
+        Set-PatchValue -InputObject $VMRecord -Name 'steps' -Value @(@(Get-PatchArray (Get-PatchValue $VMRecord @('steps') @())) + $step)
     }
 
-    if (-not [bool](Get-PatchValue $step @('startAttempted') $false)) {
+    if (($Action -eq 'Install' -or $Action -eq 'Reboot') -and -not [bool](Get-PatchValue $step @('startAttempted') $false)) {
         $blocker = Get-PatchMutatingStepBlocker -RunState $RunState -VMRecord $VMRecord -CurrentStep $step
         if ($null -ne $blocker) {
-            $blockerAction = [string](Get-PatchValue $blocker @('action') 'mutating')
-            $blockerRound = [string](Get-PatchValue $blocker @('round') '?')
             return [pscustomobject]@{
                 status = 'NeedsReview'
                 step = $step
                 agentStatus = $null
-                error = ('The previous {0} step in round {1} has no matching terminal evidence. Resolve it before starting another mutating action.' -f $blockerAction, $blockerRound)
+                error = ('The {0} step of round {1} has no final result. Check the guest and use Mark steps reviewed.' -f $blocker.action, $blocker.round)
             }
         }
     }
@@ -842,193 +730,57 @@ function Invoke-PatchAgentStep {
     return [pscustomobject]@{ status = $waitResult.status; step = $step; agentStatus = $waitResult.agentStatus; error = $waitResult.error }
 }
 
-function Invoke-PatchRebootConfirmation {
-    param(
-        [string]$RunPath,
-        $RunState,
-        $VMRecord,
-        $Server,
-        $GuestCredential,
-        $Step,
-        $InitialVM,
-        $InitialContext,
-        [int]$TimeoutMinutes
-    )
+function Wait-PatchReboot {
+    # Plan step 5: a reboot is confirmed only by a guest boot time newer than the baseline saved
+    # before the reboot was sent. This function never sends a reboot.
+    param([string]$RunPath, $RunState, $VMRecord, $Step, $Server, $GuestCredential, [int]$TimeoutMinutes)
 
-    $vmName = [string](Get-PatchValue $VMRecord @('vmName') '')
-    $expectedFqdn = [string](Get-PatchValue $VMRecord @('expectedFqdn') '')
-    $savedId = [string](Get-PatchValue $VMRecord @('vmId') '')
-    $baseline = [string](Get-PatchValue $Step @('baselineBootTime') '')
-    $baselineDate = $null
-    try { $baselineDate = [datetime]::Parse($baseline).ToUniversalTime() } catch { }
-
-    $deadlineText = [string](Get-PatchValue $Step @('confirmationDeadlineAt') '')
-    $deadline = $null
-    if (-not [string]::IsNullOrWhiteSpace($deadlineText)) {
-        try { $deadline = [datetime]::Parse($deadlineText).ToUniversalTime() } catch { $deadline = $null }
-    }
-    if ($null -eq $deadline) {
-        $deadline = (Get-Date).ToUniversalTime().AddMinutes([math]::Max(1, $TimeoutMinutes))
-        Set-PatchValue -InputObject $Step -Name 'confirmationDeadlineAt' -Value $deadline.ToString('o')
+    $baseline = [datetime]::Parse([string]$Step.baselineBootTime).ToUniversalTime()
+    $ignoreEsxi = [bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)
+    $localStatusPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step).status
+    if ([string]::IsNullOrWhiteSpace([string](Get-PatchValue $Step @('confirmationDeadlineAt') ''))) {
+        Set-PatchValue -InputObject $Step -Name 'confirmationDeadlineAt' -Value (Get-Date).ToUniversalTime().AddMinutes($TimeoutMinutes).ToString('o')
         Save-PatchDecision -RunPath $RunPath -RunState $RunState
     }
+    $deadline = [datetime]::Parse([string]$Step.confirmationDeadlineAt).ToUniversalTime()
 
     $lastError = $null
-    $runIdText = [string](Get-PatchValue $RunState @('runId') '')
-    $stepIdText = [string](Get-PatchValue $Step @('stepId') '')
-    $failedResult = Get-PatchRebootFailureResult -Step $Step -RunId $runIdText -StepId $stepIdText
-    if ($null -ne $failedResult) { return $failedResult }
-    $hasRebootEvidence = Test-PatchRebootRequestStatus -Status (Get-PatchValue $Step @('agentStatus') $null) -RunId $runIdText -StepId $stepIdText
-    $firstAttempt = $true
-    $firstPoll = $true
-    while ($firstPoll -or (Get-Date).ToUniversalTime() -lt $deadline) {
-        $firstPoll = $false
-        $vm = $null
-        $context = $null
+    while ($true) {
         try {
-            if ($firstAttempt -and $null -ne $InitialVM) {
-                $vm = $InitialVM
+            # Get-PatchVM also requires the VM to be powered on with VMware Tools running.
+            $vm = Get-PatchVM -Server $Server -Name $VMRecord.vmName -ExpectedFqdn $VMRecord.expectedFqdn -SavedId $VMRecord.vmId
+            $context = Get-GuestContext -VM $vm -GuestCredential $GuestCredential
+            $status = Read-GuestStatus -Context $context -RunId $RunState.runId -StepId $Step.stepId -ExpectedMode 'Reboot' -LocalPath $localStatusPath -IgnoreEsxiCertificate $ignoreEsxi
+            if ($null -ne $status) { Set-PatchValue -InputObject $Step -Name 'agentStatus' -Value $status }
+            if ([string](Get-PatchValue $status @('status') '') -eq 'Failed') {
+                $result = [pscustomobject]@{ status = 'Failed'; step = $Step; agentStatus = $status; error = [string](Get-PatchValue $status @('error') 'The reboot command failed.') }
+                break
             }
-            else {
-                $vm = Get-PatchVM -Server $Server -Name $vmName -ExpectedFqdn $expectedFqdn -SavedId $savedId
-            }
-            if ($firstAttempt -and $null -ne $InitialContext) {
-                $context = $InitialContext
-            }
-            else {
-                $context = Get-GuestContext -VM $vm -GuestCredential $GuestCredential
-            }
-            [void](Read-PatchRebootEvidence -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Step $Step -Context $context)
-            $failedResult = Get-PatchRebootFailureResult -Step $Step -RunId $runIdText -StepId $stepIdText
-            if ($null -ne $failedResult) { return $failedResult }
-            $hasRebootEvidence = $hasRebootEvidence -or (Test-PatchRebootRequestStatus -Status (Get-PatchValue $Step @('agentStatus') $null) -RunId $runIdText -StepId $stepIdText)
-            if ($hasRebootEvidence) {
-                $currentBoot = [string](Read-GuestBootTime -Context $context -IgnoreEsxiCertificate ([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)))
-                $currentDate = $null
-                try { $currentDate = [datetime]::Parse($currentBoot).ToUniversalTime() } catch { }
-                if ($null -ne $baselineDate -and $null -ne $currentDate -and $currentDate -gt $baselineDate) {
-                    Set-PatchValue -InputObject $Step -Name 'status' -Value 'Confirmed'
-                    Set-PatchValue -InputObject $Step -Name 'finishedAt' -Value (Get-PatchUtcNow)
-                    Set-PatchValue -InputObject $Step -Name 'confirmedBootTime' -Value $currentBoot
-                    Save-PatchDecision -RunPath $RunPath -RunState $RunState
-                    return [pscustomobject]@{
-                        status = 'Confirmed'
-                        step = $Step
-                        agentStatus = Get-PatchValue $Step @('agentStatus') $null
-                        error = $null
-                    }
-                }
+            $bootTime = Read-GuestBootTime -Context $context -IgnoreEsxiCertificate $ignoreEsxi
+            if ([datetime]::Parse($bootTime).ToUniversalTime() -gt $baseline) {
+                Set-PatchValue -InputObject $Step -Name 'confirmedBootTime' -Value $bootTime
+                $result = [pscustomobject]@{ status = 'Confirmed'; step = $Step; agentStatus = $status; error = $null }
+                break
             }
         }
         catch {
+            # Expected while the guest restarts.
             $lastError = Protect-PatchText $_.Exception.Message
         }
-
-        $firstAttempt = $false
-        if ((Get-Date).ToUniversalTime() -ge $deadline) { break }
-        Start-Sleep -Seconds 5
+        if ((Get-Date).ToUniversalTime() -ge $deadline) {
+            $message = 'A newer guest boot time was not observed before the reboot confirmation limit.'
+            if ($null -ne $lastError) { $message += ' Last error: ' + $lastError }
+            $result = [pscustomobject]@{ status = 'PendingRebootConfirmation'; step = $Step; agentStatus = $null; error = $message }
+            break
+        }
+        Start-Sleep -Seconds 10
     }
 
-    $timeoutMessage = 'Matching RebootRequested status evidence, VMware Tools, and a strictly newer guest boot time were not observed before the reboot confirmation deadline.'
-    if (-not [string]::IsNullOrWhiteSpace([string]$lastError)) { $timeoutMessage += ' Last read error: ' + $lastError }
-    Set-PatchValue -InputObject $Step -Name 'status' -Value 'PendingRebootConfirmation'
-    Set-PatchValue -InputObject $Step -Name 'error' -Value $timeoutMessage
+    Set-PatchValue -InputObject $Step -Name 'status' -Value $result.status
+    Set-PatchValue -InputObject $Step -Name 'error' -Value $result.error
+    if ($result.status -ne 'PendingRebootConfirmation') { Set-PatchValue -InputObject $Step -Name 'finishedAt' -Value (Get-PatchUtcNow) }
     Save-PatchDecision -RunPath $RunPath -RunState $RunState
-    return [pscustomobject]@{
-        status = 'PendingRebootConfirmation'
-        step = $Step
-        agentStatus = Get-PatchValue $Step @('agentStatus') $null
-        error = $timeoutMessage
-    }
-}
-
-function Read-PatchRebootEvidence {
-    param([string]$RunPath, $RunState, $VMRecord, $Step, $Context)
-
-    $runId = [Guid](Get-PatchValue $RunState @('runId') '')
-    $stepId = [Guid](Get-PatchValue $Step @('stepId') '')
-    $mode = 'Reboot'
-    $localPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step).status
-    try {
-        $status = Read-GuestStatus -Context $Context -RunId $runId -StepId $stepId -ExpectedMode $mode -LocalPath $localPath -IgnoreEsxiCertificate ([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false))
-        if (Test-PatchFailedStatus -Status $status -RunId $runId.ToString('D') -StepId $stepId.ToString('D') -Mode $mode) {
-            $errorMessage = [string](Get-PatchValue $status @('error', 'outcome') 'Guest agent failed.')
-            if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = 'Guest agent failed.' }
-            Set-PatchValue -InputObject $Step -Name 'agentStatus' -Value $status
-            Set-PatchValue -InputObject $Step -Name 'status' -Value 'Failed'
-            Set-PatchValue -InputObject $Step -Name 'error' -Value (Protect-PatchText $errorMessage)
-            Set-PatchValue -InputObject $Step -Name 'finishedAt' -Value (Get-PatchUtcNow)
-            Save-PatchDecision -RunPath $RunPath -RunState $RunState
-            return $true
-        }
-        if (Test-PatchRebootRequestStatus -Status $status -RunId $runId.ToString('D') -StepId $stepId.ToString('D')) {
-            Set-PatchValue -InputObject $Step -Name 'agentStatus' -Value $status
-            Set-PatchValue -InputObject $Step -Name 'requestEvidence' -Value $status
-            Set-PatchValue -InputObject $Step -Name 'status' -Value 'PendingRebootConfirmation'
-            Save-PatchDecision -RunPath $RunPath -RunState $RunState
-            return $true
-        }
-    }
-    catch {
-        # A missing or transient status read does not authorize a resend. Boot and
-        # VMware Tools observation remains the confirmation gate.
-    }
-    return $false
-}
-
-function Invoke-PatchRebootStep {
-    param(
-        [string]$RunPath,
-        $RunState,
-        $VMRecord,
-        $VM,
-        $Context,
-        $Server,
-        $GuestCredential,
-        [int]$TimeoutMinutes,
-        [switch]$StartOnly
-    )
-
-    $round = [int](Get-PatchValue $VMRecord @('currentRound') (Get-PatchValue $RunState @('currentRound') 1))
-    $step = Get-PatchStep -VMRecord $VMRecord -Action 'Reboot' -Round $round
-    $baseline = [string](Get-PatchValue $step @('baselineBootTime') '')
-    if ([string]::IsNullOrWhiteSpace($baseline)) {
-        $baseline = [string](Read-GuestBootTime -Context $Context -IgnoreEsxiCertificate ([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)))
-        if ([string]::IsNullOrWhiteSpace($baseline)) { throw 'A baseline guest boot time could not be read.' }
-        Set-PatchValue -InputObject $step -Name 'baselineBootTime' -Value $baseline
-        Save-PatchDecision -RunPath $RunPath -RunState $RunState
-    }
-
-    if (-not [bool](Get-PatchValue $step @('startAttempted') $false)) {
-        $agentResult = Invoke-PatchAgentStep -Action 'Reboot' -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -VM $VM -Context $Context -TimeoutMinutes $TimeoutMinutes -StartOnly:$StartOnly
-        if ($agentResult.status -eq 'NeedsReview' -or $agentResult.status -eq 'Failed') {
-            return $agentResult
-        }
-        $step = $agentResult.step
-    }
-    if ($StartOnly) {
-        return [pscustomobject]@{ status = 'Started'; step = $step; agentStatus = Get-PatchValue $step @('agentStatus') $null; error = $null }
-    }
-
-    $runIdText = [string](Get-PatchValue $RunState @('runId') '')
-    $stepIdText = [string](Get-PatchValue $step @('stepId') '')
-    $hasRebootEvidence = Test-PatchRebootRequestStatus -Status (Get-PatchValue $step @('agentStatus') $null) -RunId $runIdText -StepId $stepIdText
-    if (-not $hasRebootEvidence) {
-        [void](Read-PatchRebootEvidence -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Step $step -Context $Context)
-        $failedResult = Get-PatchRebootFailureResult -Step $step -RunId $runIdText -StepId $stepIdText
-        if ($null -ne $failedResult) { return $failedResult }
-        $hasRebootEvidence = Test-PatchRebootRequestStatus -Status (Get-PatchValue $step @('agentStatus') $null) -RunId $runIdText -StepId $stepIdText
-    }
-    if ($hasRebootEvidence -and [string]::Equals([string](Get-PatchValue $step @('status') ''), 'RebootRequested', [System.StringComparison]::OrdinalIgnoreCase)) {
-        Set-PatchValue -InputObject $step -Name 'requestEvidence' -Value (Get-PatchValue $step @('agentStatus') $null)
-        Set-PatchValue -InputObject $step -Name 'status' -Value 'PendingRebootConfirmation'
-        Save-PatchDecision -RunPath $RunPath -RunState $RunState
-    }
-    elseif (-not $hasRebootEvidence -and -not [string]::Equals([string](Get-PatchValue $step @('status') ''), 'Confirmed', [System.StringComparison]::OrdinalIgnoreCase)) {
-        Set-PatchValue -InputObject $step -Name 'status' -Value 'PendingRebootConfirmation'
-        Save-PatchDecision -RunPath $RunPath -RunState $RunState
-    }
-    return (Invoke-PatchRebootConfirmation -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Server $Server -GuestCredential $GuestCredential -Step $step -InitialVM $VM -InitialContext $Context -TimeoutMinutes $TimeoutMinutes)
+    return $result
 }
 
 function Invoke-PatchVmAction {
@@ -1042,47 +794,24 @@ function Invoke-PatchVmAction {
         [switch]$StartOnly
     )
 
-    $vmName = [string](Get-PatchValue $VMRecord @('vmName') '')
-    $expectedFqdn = [string](Get-PatchValue $VMRecord @('expectedFqdn') '')
-    $savedId = [string](Get-PatchValue $VMRecord @('vmId') '')
-    $rebootStep = $null
-    $rebootInFlight = $false
+    $round = [int](Get-PatchValue $VMRecord @('currentRound') 1)
     if ($Action -eq 'Reboot') {
-        $rebootStep = Get-PatchStep -VMRecord $VMRecord -Action 'Reboot' -Round ([int](Get-PatchValue $VMRecord @('currentRound') 1))
-        $rebootInFlight = [bool](Get-PatchValue $rebootStep @('startAttempted') $false) -and [string](Get-PatchValue $rebootStep @('status') '') -ne 'Confirmed'
-    }
-    try {
-        $vm = Get-PatchVM -Server $Server -Name $vmName -ExpectedFqdn $expectedFqdn -SavedId $savedId
-    }
-    catch {
-        if ($rebootInFlight) {
-            if ($StartOnly) {
-                return [pscustomobject]@{ status = 'Started'; error = $null; step = $rebootStep; agentStatus = Get-PatchValue $VMRecord @('agentStatus') $null }
-            }
-            return (Invoke-PatchRebootConfirmation -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Server $Server -GuestCredential $GuestCredential -Step $rebootStep -InitialVM $null -InitialContext $null -TimeoutMinutes (Get-PatchLimit $RunState 'rebootConfirmationTimeoutMinutes' 30))
+        $rebootStep = Get-PatchStep -VMRecord $VMRecord -Action 'Reboot' -Round $round
+        if ([bool](Get-PatchValue $rebootStep @('startAttempted') $false)) {
+            # The reboot was already sent (possibly before the GUI was closed): only observe it.
+            if ($StartOnly) { return [pscustomobject]@{ status = 'Started'; step = $rebootStep; agentStatus = $null; error = $null } }
+            return (Wait-PatchReboot -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Step $rebootStep -Server $Server -GuestCredential $GuestCredential -TimeoutMinutes (Get-PatchLimit $RunState 'rebootConfirmationTimeoutMinutes' 30))
         }
-        throw
     }
-    # Get-PatchVM verified the name, saved ID, FQDN, power state and VMware Tools.
-    # The first resolution binds the run entry to this vCenter object ID.
-    if ([string]::IsNullOrWhiteSpace($savedId)) {
+
+    # Get-PatchVM checks the exact name, saved ID, FQDN, power state and VMware Tools.
+    $vm = Get-PatchVM -Server $Server -Name $VMRecord.vmName -ExpectedFqdn $VMRecord.expectedFqdn -SavedId $VMRecord.vmId
+    if ([string]::IsNullOrWhiteSpace([string]$VMRecord.vmId)) {
+        # The first resolution binds the run entry to this vCenter object ID.
         Set-PatchValue -InputObject $VMRecord -Name 'vmId' -Value ([string]$vm.Id)
         Save-PatchDecision -RunPath $RunPath -RunState $RunState
     }
-
-    $context = $null
-    try {
-        $context = Get-GuestContext -VM $vm -GuestCredential $GuestCredential
-    }
-    catch {
-        if ($Action -eq 'Reboot' -and [bool](Get-PatchValue (Get-PatchStep -VMRecord $VMRecord -Action 'Reboot' -Round ([int](Get-PatchValue $VMRecord @('currentRound') 1))) @('startAttempted') $false)) {
-            if ($StartOnly) {
-                return [pscustomobject]@{ status = 'Started'; error = $null; step = $rebootStep; agentStatus = Get-PatchValue $VMRecord @('agentStatus') $null }
-            }
-            return (Invoke-PatchRebootConfirmation -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Server $Server -GuestCredential $GuestCredential -Step $rebootStep -InitialVM $vm -InitialContext $null -TimeoutMinutes (Get-PatchLimit $RunState 'rebootConfirmationTimeoutMinutes' 30))
-        }
-        throw
-    }
+    $context = Get-GuestContext -VM $vm -GuestCredential $GuestCredential
 
     if ($Action -eq 'Install' -or $Action -eq 'Reboot') {
         # Last scan result; the agent checks the cluster state again in the guest before acting.
@@ -1091,11 +820,18 @@ function Invoke-PatchVmAction {
     }
 
     if ($Action -eq 'Reboot') {
-        return (Invoke-PatchRebootStep -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -VM $vm -Context $context -Server $Server -GuestCredential $GuestCredential -TimeoutMinutes (Get-PatchLimit $RunState 'rebootConfirmationTimeoutMinutes' 30) -StartOnly:$StartOnly)
+        # The baseline is saved before the reboot is sent; without it the reboot could never be confirmed.
+        if ([string]::IsNullOrWhiteSpace([string](Get-PatchValue $rebootStep @('baselineBootTime') ''))) {
+            Set-PatchValue -InputObject $rebootStep -Name 'baselineBootTime' -Value (Read-GuestBootTime -Context $context -IgnoreEsxiCertificate ([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)))
+            Save-PatchDecision -RunPath $RunPath -RunState $RunState
+        }
+        $started = Invoke-PatchAgentStep -Action 'Reboot' -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Context $context -TimeoutMinutes 1 -StartOnly
+        if ($StartOnly -or $started.status -ne 'Started') { return $started }
+        return (Wait-PatchReboot -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Step $started.step -Server $Server -GuestCredential $GuestCredential -TimeoutMinutes (Get-PatchLimit $RunState 'rebootConfirmationTimeoutMinutes' 30))
     }
     $timeoutMinutes = Get-PatchLimit $RunState 'scanTimeoutMinutes' 30
     if ($Action -eq 'Install') { $timeoutMinutes = Get-PatchLimit $RunState 'installTimeoutMinutes' 180 }
-    return (Invoke-PatchAgentStep -Action $Action -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -VM $vm -Context $context -TimeoutMinutes $timeoutMinutes -StartOnly:$StartOnly)
+    return (Invoke-PatchAgentStep -Action $Action -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Context $context -TimeoutMinutes $timeoutMinutes -StartOnly:$StartOnly)
 }
 
 function Add-PatchVmResult {
