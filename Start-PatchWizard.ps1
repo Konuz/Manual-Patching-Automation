@@ -28,66 +28,9 @@ $script:Wizard = @{
     Controls = @{}
 }
 
-if (Test-Path -LiteralPath $script:ControllerPath -PathType Leaf) {
-    $savedPreference = $ErrorActionPreference
-    try {
-        . $script:ControllerPath
-    }
-    finally {
-        $ErrorActionPreference = $savedPreference
-    }
-}
-
-function Get-WizardProperty {
-    param(
-        $InputObject,
-        [Parameter(Mandatory = $true)][string[]]$Names,
-        $Default = $null
-    )
-
-    if ($null -eq $InputObject) { return $Default }
-    foreach ($name in $Names) {
-        try {
-            if ($InputObject -is [System.Collections.IDictionary] -and $InputObject.Contains($name)) {
-                return $InputObject[$name]
-            }
-            $property = $InputObject.PSObject.Properties[$name]
-            if ($null -ne $property) {
-                return $property.Value
-            }
-        }
-        catch {
-        }
-    }
-    return $Default
-}
-
-function Set-WizardProperty {
-    param(
-        [Parameter(Mandatory = $true)]$InputObject,
-        [Parameter(Mandatory = $true)][string]$Name,
-        $Value
-    )
-
-    if ($null -eq $InputObject) { return }
-    if ($InputObject -is [System.Collections.IDictionary]) {
-        $InputObject[$Name] = $Value
-        return
-    }
-    $property = $InputObject.PSObject.Properties[$Name]
-    if ($null -eq $property) {
-        Add-Member -InputObject $InputObject -MemberType NoteProperty -Name $Name -Value $Value -Force
-    }
-    else {
-        $InputObject.$Name = $Value
-    }
-}
-
-function Get-WizardArray {
-    param($Value)
-    if ($null -eq $Value) { return @() }
-    return @($Value)
-}
+$savedPreference = $ErrorActionPreference
+. $script:ControllerPath
+$ErrorActionPreference = $savedPreference
 
 function Get-WizardRunDirectory {
     if ([string]::IsNullOrWhiteSpace([string]$script:Wizard.RunPath)) { return $null }
@@ -187,8 +130,8 @@ function Get-WizardConfigFromControls {
 
 function Get-WizardSelectedUpdateKey {
     param($Update)
-    $id = [string](Get-WizardProperty -InputObject $Update -Names @('updateId', 'UpdateID', 'UpdateId', 'id') -Default '')
-    $revision = Get-WizardProperty -InputObject $Update -Names @('revisionNumber', 'RevisionNumber', 'revision') -Default $null
+    $id = [string](Get-PatchValue -InputObject $Update -Names @('updateId') -Default '')
+    $revision = Get-PatchValue -InputObject $Update -Names @('revisionNumber') -Default $null
     if ([string]::IsNullOrWhiteSpace($id) -or $null -eq $revision) { return $null }
     return ('{0}|{1}' -f $id.ToLowerInvariant(), [int64]$revision)
 }
@@ -199,16 +142,16 @@ function Save-WizardSelections {
     }
 
     $allSelected = @()
-    foreach ($vm in @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()))) {
-        $vmName = [string](Get-WizardProperty $vm @('vmName') '')
+    foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
+        $vmName = [string](Get-PatchValue $vm @('vmName') '')
         $rows = @($script:Wizard.UpdateRows | Where-Object { $_.VmName -eq $vmName })
         $selected = @()
         foreach ($row in $rows) {
             $record = $row.Update
             $key = Get-WizardSelectedUpdateKey -Update $record
             if ($row.Selected -and $null -ne $key) {
-                $id = [string](Get-WizardProperty $record @('updateId', 'UpdateID', 'UpdateId', 'id') '')
-                $revision = [int64](Get-WizardProperty $record @('revisionNumber', 'RevisionNumber', 'revision') 0)
+                $id = [string](Get-PatchValue $record @('updateId') '')
+                $revision = [int64](Get-PatchValue $record @('revisionNumber') 0)
                 $selected += [pscustomobject][ordered]@{
                     updateId = $id
                     revisionNumber = $revision
@@ -218,17 +161,17 @@ function Save-WizardSelections {
                     updateId = $id
                     revisionNumber = $revision
                 }
-                Set-WizardProperty -InputObject $record -Name 'selected' -Value $true
+                Set-PatchValue -InputObject $record -Name 'selected' -Value $true
             }
             else {
-                Set-WizardProperty -InputObject $record -Name 'selected' -Value $false
+                Set-PatchValue -InputObject $record -Name 'selected' -Value $false
             }
         }
-        Set-WizardProperty -InputObject $vm -Name 'selectedUpdates' -Value @($selected)
-        Set-WizardProperty -InputObject $vm -Name 'selectionSaved' -Value $true
+        Set-PatchValue -InputObject $vm -Name 'selectedUpdates' -Value @($selected)
+        Set-PatchValue -InputObject $vm -Name 'selectionSaved' -Value $true
     }
 
-    Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'selectedUpdates' -Value @($allSelected)
+    Set-PatchValue -InputObject $script:Wizard.RunState -Name 'selectedUpdates' -Value @($allSelected)
     Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
     Set-WizardStatus -Message ('Saved {0} exact update selections.' -f $allSelected.Count)
     Refresh-WizardSelectionGrid
@@ -238,26 +181,26 @@ function Set-WizardSettingsFromRun {
     param([Parameter(Mandatory = $true)]$RunState)
 
     $controls = $script:Wizard.Controls
-    $options = Get-WizardProperty $RunState @('options') ([pscustomobject]@{})
-    $limits = Get-WizardProperty $options @('limits') ([pscustomobject]@{})
-    $controls.VCenter.Text = [string](Get-WizardProperty $RunState @('vCenter') '')
-    $controls.OutputRoot.Text = [string](Split-Path -Parent (Split-Path -Parent ([string](Get-WizardProperty $RunState @('runPath') ''))))
+    $options = Get-PatchValue $RunState @('options') ([pscustomobject]@{})
+    $limits = Get-PatchValue $options @('limits') ([pscustomobject]@{})
+    $controls.VCenter.Text = [string](Get-PatchValue $RunState @('vCenter') '')
+    $controls.OutputRoot.Text = [string](Split-Path -Parent (Split-Path -Parent ([string](Get-PatchValue $RunState @('runPath') ''))))
     if ([string]::IsNullOrWhiteSpace($controls.OutputRoot.Text)) {
-        $runDirectory = Split-Path -Parent ([string](Get-WizardProperty $RunState @('runPath') ''))
+        $runDirectory = Split-Path -Parent ([string](Get-PatchValue $RunState @('runPath') ''))
         $controls.OutputRoot.Text = Split-Path -Parent $runDirectory
     }
-    $controls.ScanConcurrency.Text = [string](Get-WizardProperty $options @('scanConcurrency') 3)
-    $controls.InstallConcurrency.Text = [string](Get-WizardProperty $options @('installConcurrency') 3)
-    $controls.RebootBatch.Text = [string](Get-WizardProperty $options @('rebootBatchSize') 1)
-    $controls.ScanLimit.Text = [string](Get-WizardProperty $limits @('scanTimeoutMinutes') 30)
-    $controls.InstallLimit.Text = [string](Get-WizardProperty $limits @('installTimeoutMinutes') 180)
-    $controls.RebootLimit.Text = [string](Get-WizardProperty $limits @('rebootConfirmationTimeoutMinutes') 30)
-    $controls.IgnoreVCenter.Checked = [bool](Get-WizardProperty $options @('ignoreVCenterCertificate') $false)
-    $controls.IgnoreEsxi.Checked = [bool](Get-WizardProperty $options @('ignoreEsxiCertificatesForFileTransfers') $false)
+    $controls.ScanConcurrency.Text = [string](Get-PatchValue $options @('scanConcurrency') 3)
+    $controls.InstallConcurrency.Text = [string](Get-PatchValue $options @('installConcurrency') 3)
+    $controls.RebootBatch.Text = [string](Get-PatchValue $options @('rebootBatchSize') 1)
+    $controls.ScanLimit.Text = [string](Get-PatchValue $limits @('scanTimeoutMinutes') 30)
+    $controls.InstallLimit.Text = [string](Get-PatchValue $limits @('installTimeoutMinutes') 180)
+    $controls.RebootLimit.Text = [string](Get-PatchValue $limits @('rebootConfirmationTimeoutMinutes') 30)
+    $controls.IgnoreVCenter.Checked = [bool](Get-PatchValue $options @('ignoreVCenterCertificate') $false)
+    $controls.IgnoreEsxi.Checked = [bool](Get-PatchValue $options @('ignoreEsxiCertificatesForFileTransfers') $false)
 
     $lines = @()
-    foreach ($vm in @(Get-WizardArray (Get-WizardProperty $RunState @('vms') @()))) {
-        $lines += ('{0}|{1}' -f [string](Get-WizardProperty $vm @('vmName') ''), [string](Get-WizardProperty $vm @('expectedFqdn') ''))
+    foreach ($vm in @(Get-PatchArray (Get-PatchValue $RunState @('vms') @()))) {
+        $lines += ('{0}|{1}' -f [string](Get-PatchValue $vm @('vmName') ''), [string](Get-PatchValue $vm @('expectedFqdn') ''))
     }
     $controls.VmEntries.Text = ($lines -join [Environment]::NewLine)
 }
@@ -268,12 +211,12 @@ function New-WizardRun {
         $config = Get-WizardConfigFromControls
         $entries = ConvertTo-WizardVmEntries -Text $script:Wizard.Controls.VmEntries.Text
         $script:Wizard.RunState = New-PatchRun -Config $config -VMEntries $entries
-        $script:Wizard.RunPath = [string](Get-WizardProperty $script:Wizard.RunState @('runPath') '')
+        $script:Wizard.RunPath = [string](Get-PatchValue $script:Wizard.RunState @('runPath') '')
         $script:Wizard.VCenterCredential = $null
         $script:Wizard.GuestCredential = $null
         $script:Wizard.Controls.OpenLogs.Enabled = $true
         $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}' -f $script:Wizard.RunPath)
-        Set-WizardStatus -Message ('Created run {0}.' -f [string](Get-WizardProperty $script:Wizard.RunState @('runId') ''))
+        Set-WizardStatus -Message ('Created run {0}.' -f [string](Get-PatchValue $script:Wizard.RunState @('runId') ''))
         Refresh-WizardVmGrid
         Refresh-WizardSelectionGrid
         Update-WizardStepState
@@ -335,7 +278,7 @@ function Resume-WizardRun {
         Refresh-WizardVmGrid
         Refresh-WizardSelectionGrid
         Update-WizardStepState
-        $currentAction = [string](Get-WizardProperty $state @('currentAction') '')
+        $currentAction = [string](Get-PatchValue $state @('currentAction') '')
         $credentialDecision = Resolve-WizardCredentialRejection -Action $currentAction
         if ($credentialDecision -eq 'None') {
             Request-WizardCredential -Kind guest
@@ -347,7 +290,7 @@ function Resume-WizardRun {
         if ($credentialDecision -eq 'Retry' -and $currentAction -in @('Scan', 'Install', 'Reboot', 'Verify')) {
             Start-WizardAction -Action $currentAction -ApprovalAlreadyGiven
         }
-        elseif ($credentialDecision -eq 'None' -and [string](Get-WizardProperty $state @('status') '') -eq 'Running' -and $currentAction -in @('Scan', 'Install', 'Reboot', 'Verify')) {
+        elseif ($credentialDecision -eq 'None' -and [string](Get-PatchValue $state @('status') '') -eq 'Running' -and $currentAction -in @('Scan', 'Install', 'Reboot', 'Verify')) {
             Start-WizardAction -Action $currentAction -ApprovalAlreadyGiven
         }
     }
@@ -376,16 +319,16 @@ function Open-WizardLogs {
 function Get-WizardUpdateRowsFromState {
     $rows = @()
     if ($null -eq $script:Wizard.RunState) { return @() }
-    foreach ($vm in @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()))) {
-        $vmName = [string](Get-WizardProperty $vm @('vmName') '')
-        $updates = @(Get-WizardArray (Get-WizardProperty $vm @('availableUpdates') @()))
+    foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
+        $vmName = [string](Get-PatchValue $vm @('vmName') '')
+        $updates = @(Get-PatchArray (Get-PatchValue $vm @('availableUpdates') @()))
         if ($updates.Count -eq 0) {
-            $agentStatus = Get-WizardProperty $vm @('agentStatus') $null
-            $updates = @(Get-WizardArray (Get-WizardProperty $agentStatus @('updates') @()))
+            $agentStatus = Get-PatchValue $vm @('agentStatus') $null
+            $updates = @(Get-PatchArray (Get-PatchValue $agentStatus @('updates') @()))
         }
-        $savedSelection = [bool](Get-WizardProperty $vm @('selectionSaved') $false)
+        $savedSelection = [bool](Get-PatchValue $vm @('selectionSaved') $false)
         $savedKeys = @{}
-        foreach ($selectedUpdate in @(Get-WizardArray (Get-WizardProperty $vm @('selectedUpdates') @()))) {
+        foreach ($selectedUpdate in @(Get-PatchArray (Get-PatchValue $vm @('selectedUpdates') @()))) {
             $savedKey = Get-WizardSelectedUpdateKey -Update $selectedUpdate
             if ($null -ne $savedKey) { $savedKeys[$savedKey] = $true }
         }
@@ -412,9 +355,9 @@ function Refresh-WizardSelectionGrid {
     $grid.Rows.Clear()
     foreach ($row in $script:Wizard.UpdateRows) {
         $record = $row.Update
-        $type = [string](Get-WizardProperty $record @('type') 'Unknown')
-        $browseOnly = [bool](Get-WizardProperty $record @('browseOnly') $false)
-        $eulaAccepted = [bool](Get-WizardProperty $record @('eulaAccepted') $false)
+        $type = [string](Get-PatchValue $record @('type') 'Unknown')
+        $browseOnly = [bool](Get-PatchValue $record @('browseOnly') $false)
+        $eulaAccepted = [bool](Get-PatchValue $record @('eulaAccepted') $false)
         $labels = @()
         if ($type -eq 'Driver') { $labels += 'Driver' }
         if ($browseOnly) { $labels += 'Browse-only' }
@@ -422,9 +365,9 @@ function Refresh-WizardSelectionGrid {
         $labelText = if ($labels.Count -gt 0) { $labels -join ', ' } else { 'Standard update' }
         $index = $grid.Rows.Add([bool]$row.Selected,
             $row.VmName,
-            [string](Get-WizardProperty $record @('updateId', 'UpdateID', 'UpdateId') ''),
-            [string](Get-WizardProperty $record @('revisionNumber', 'RevisionNumber') ''),
-            [string](Get-WizardProperty $record @('title') ''),
+            [string](Get-PatchValue $record @('updateId') ''),
+            [string](Get-PatchValue $record @('revisionNumber') ''),
+            [string](Get-PatchValue $record @('title') ''),
             $type,
             $labelText)
         $grid.Rows[$index].Tag = $row
@@ -437,7 +380,7 @@ function Refresh-WizardSelectionGrid {
 function Refresh-WizardVmGrid {
     if ($null -eq $script:Wizard.Controls.VmGrid) { return }
     $grid = $script:Wizard.Controls.VmGrid
-    $vms = @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()))
+    $vms = @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))
     $script:Wizard.UpdatingGrid = $true
     try {
         if ($grid.Rows.Count -ne $vms.Count) {
@@ -448,18 +391,18 @@ function Refresh-WizardVmGrid {
         }
         for ($i = 0; $i -lt $vms.Count; $i++) {
             $vm = $vms[$i]
-            $updates = @(Get-WizardArray (Get-WizardProperty $vm @('availableUpdates') @()))
+            $updates = @(Get-PatchArray (Get-PatchValue $vm @('availableUpdates') @()))
             if ($updates.Count -eq 0) {
-                $updates = @(Get-WizardArray (Get-WizardProperty (Get-WizardProperty $vm @('agentStatus') $null) @('updates') @()))
+                $updates = @(Get-PatchArray (Get-PatchValue (Get-PatchValue $vm @('agentStatus') $null) @('updates') @()))
             }
-            $reboot = Get-WizardProperty $vm @('reboot') $null
-            $grid.Rows[$i].Cells[0].Value = [string](Get-WizardProperty $vm @('vmName') '')
-            $grid.Rows[$i].Cells[1].Value = [string](Get-WizardProperty $vm @('expectedFqdn') '')
-            $grid.Rows[$i].Cells[2].Value = [string](Get-WizardProperty $vm @('status') 'Pending')
-            $grid.Rows[$i].Cells[3].Value = [string](Get-WizardProperty $vm @('currentAction') '')
+            $reboot = Get-PatchValue $vm @('reboot') $null
+            $grid.Rows[$i].Cells[0].Value = [string](Get-PatchValue $vm @('vmName') '')
+            $grid.Rows[$i].Cells[1].Value = [string](Get-PatchValue $vm @('expectedFqdn') '')
+            $grid.Rows[$i].Cells[2].Value = [string](Get-PatchValue $vm @('status') 'Pending')
+            $grid.Rows[$i].Cells[3].Value = [string](Get-PatchValue $vm @('currentAction') '')
             $grid.Rows[$i].Cells[4].Value = [string]$updates.Count
-            $grid.Rows[$i].Cells[5].Value = [string](Get-WizardProperty $reboot @('status') 'NotRequested')
-            $errors = @(Get-WizardArray (Get-WizardProperty $vm @('errors') @()))
+            $grid.Rows[$i].Cells[5].Value = [string](Get-PatchValue $reboot @('status') 'NotRequested')
+            $errors = @(Get-PatchArray (Get-PatchValue $vm @('errors') @()))
             $grid.Rows[$i].Cells[6].Value = [string]$errors.Count
         }
     }
@@ -469,28 +412,7 @@ function Refresh-WizardVmGrid {
 }
 
 function Get-WizardPendingRebootVms {
-    $pending = @()
-    foreach ($vm in @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()))) {
-        $agentStatus = Get-WizardProperty $vm @('agentStatus') $null
-        $system = Get-WizardProperty $agentStatus @('system') $null
-        $pendingInfo = Get-WizardProperty $system @('pendingReboot') $null
-        $isPending = [bool](Get-WizardProperty $pendingInfo @('isPending') $false)
-        $reboot = Get-WizardProperty $vm @('reboot') $null
-        if ([bool](Get-WizardProperty $reboot @('required') $false)) { $isPending = $true }
-        $rebootStatus = [string](Get-WizardProperty $reboot @('status') '')
-        if ($rebootStatus -match '(?i)^(Pending|PendingRebootConfirmation|PendingRebootBarrier|RebootRequested)$') { $isPending = $true }
-        foreach ($update in @(Get-WizardArray (Get-WizardProperty $agentStatus @('updates') @()))) {
-            $installResult = Get-WizardProperty $update @('installResult') $null
-            if ([bool](Get-WizardProperty $installResult @('rebootRequired') $false)) { $isPending = $true }
-        }
-        foreach ($update in @(Get-WizardArray (Get-WizardProperty $vm @('installedUpdates') @()))) {
-            if ([bool](Get-WizardProperty $update @('rebootRequired', 'requiresReboot') $false)) { $isPending = $true }
-        }
-        $vmStatus = [string](Get-WizardProperty $vm @('status') '')
-        if ($vmStatus -match '(?i)^(PendingRebootConfirmation|PendingRebootBarrier|RebootRequested)$') { $isPending = $true }
-        if ($isPending) { $pending += $vm }
-    }
-    return @($pending)
+    return @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()) | Where-Object { Test-PatchVmRequiresReboot -VMRecord $_ })
 }
 
 function Refresh-WizardRebootGrid {
@@ -499,10 +421,10 @@ function Refresh-WizardRebootGrid {
     $grid.Rows.Clear()
     foreach ($vm in @(Get-WizardPendingRebootVms)) {
         $index = $grid.Rows.Add(
-            [string](Get-WizardProperty $vm @('vmName') ''),
-            [string](Get-WizardProperty $vm @('expectedFqdn') ''),
-            [string](Get-WizardProperty $vm @('status') 'Pending'),
-            [string](Get-WizardProperty (Get-WizardProperty $vm @('agentStatus') $null) @('outcome') 'Pending reboot'))
+            [string](Get-PatchValue $vm @('vmName') ''),
+            [string](Get-PatchValue $vm @('expectedFqdn') ''),
+            [string](Get-PatchValue $vm @('status') 'Pending'),
+            [string](Get-PatchValue (Get-PatchValue $vm @('agentStatus') $null) @('outcome') 'Pending reboot'))
         $grid.Rows[$index].Tag = $vm
     }
     $script:Wizard.Controls.RebootButton.Enabled = ($grid.Rows.Count -gt 0 -and $null -eq $script:Wizard.ActivePowerShell)
@@ -511,11 +433,11 @@ function Refresh-WizardRebootGrid {
 function Sync-WizardAvailableUpdates {
     if ($null -eq $script:Wizard.RunState) { return }
     $changed = $false
-    foreach ($vm in @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()))) {
-        $agentStatus = Get-WizardProperty $vm @('agentStatus') $null
-        $updates = @(Get-WizardArray (Get-WizardProperty $agentStatus @('updates') @()))
+    foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
+        $agentStatus = Get-PatchValue $vm @('agentStatus') $null
+        $updates = @(Get-PatchArray (Get-PatchValue $agentStatus @('updates') @()))
         if ($updates.Count -gt 0) {
-            Set-WizardProperty -InputObject $vm -Name 'availableUpdates' -Value @($updates)
+            Set-PatchValue -InputObject $vm -Name 'availableUpdates' -Value @($updates)
             $changed = $true
         }
     }
@@ -525,10 +447,7 @@ function Sync-WizardAvailableUpdates {
 function Get-WizardUnresolvedMutatingStep {
     if ($null -eq $script:Wizard.RunState) { return $null }
 
-    if ($null -eq (Get-Command -Name 'Get-PatchMutatingStepBlocker' -ErrorAction SilentlyContinue)) {
-        return [pscustomobject]@{ action = 'mutating'; round = '?' }
-    }
-    foreach ($vm in @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()))) {
+    foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
         $blocker = Get-PatchMutatingStepBlocker -RunState $script:Wizard.RunState -VMRecord $vm -CurrentStep $null
         if ($null -ne $blocker) {
             return $blocker
@@ -539,7 +458,7 @@ function Get-WizardUnresolvedMutatingStep {
 
 function Update-WizardStepState {
     if ($null -eq $script:Wizard.RunState) { return }
-    $state = [string](Get-WizardProperty $script:Wizard.RunState @('status') 'Created')
+    $state = [string](Get-PatchValue $script:Wizard.RunState @('status') 'Created')
     $active = $null -ne $script:Wizard.ActivePowerShell
     $script:Wizard.Controls.ResumeButton.Enabled = (-not $active)
     $script:Wizard.Controls.ScanButton.Enabled = (-not $active)
@@ -554,12 +473,12 @@ function Update-WizardStepState {
 
 function Update-WizardProgress {
     if ($null -eq $script:Wizard.Controls.ProgressBar -or $null -eq $script:Wizard.RunState) { return }
-    $vms = @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()))
+    $vms = @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))
     $total = $vms.Count
-    $actionText = [string](Get-WizardProperty $script:Wizard.RunState @('currentAction') '')
+    $actionText = [string](Get-PatchValue $script:Wizard.RunState @('currentAction') '')
     $done = 0
     if (-not [string]::IsNullOrWhiteSpace($actionText)) {
-        $done = @($vms | Where-Object { [string](Get-WizardProperty $_ @('lastProcessedAction') '') -eq $actionText }).Count
+        $done = @($vms | Where-Object { [string](Get-PatchValue $_ @('lastProcessedAction') '') -eq $actionText }).Count
     }
     $percent = 0
     if ($total -gt 0) {
@@ -642,11 +561,11 @@ function Resolve-WizardCredentialRejection {
     param([string]$Action)
 
     # Plan step 1: a rejected guest credential offers Retry, Skip (for the rest of this run), or Stop.
-    $affected = @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()) |
-        Where-Object { [string](Get-WizardProperty $_ @('status') '') -eq 'GuestCredentialRejected' })
+    $affected = @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()) |
+        Where-Object { [string](Get-PatchValue $_ @('status') '') -eq 'GuestCredentialRejected' })
     if ($affected.Count -eq 0) { return 'None' }
 
-    $names = @($affected | ForEach-Object { [string](Get-WizardProperty $_ @('vmName') '') })
+    $names = @($affected | ForEach-Object { [string](Get-PatchValue $_ @('vmName') '') })
     $choice = Show-WizardCredentialDecision -VmNames $names
     if ($choice -eq 'Retry') {
         $script:Wizard.GuestCredential = $null
@@ -655,18 +574,18 @@ function Resolve-WizardCredentialRejection {
             Set-WizardStatus -Message 'Retry cancelled because no replacement guest credential was supplied.'
             return 'Cancel'
         }
-        foreach ($vm in $affected) { Set-WizardProperty -InputObject $vm -Name 'status' -Value 'Pending' }
+        foreach ($vm in $affected) { Set-PatchValue -InputObject $vm -Name 'status' -Value 'Pending' }
         Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
         return 'Retry'
     }
     if ($choice -eq 'Skip') {
-        foreach ($vm in $affected) { Set-WizardProperty -InputObject $vm -Name 'status' -Value 'SkippedGuestAccount' }
+        foreach ($vm in $affected) { Set-PatchValue -InputObject $vm -Name 'status' -Value 'SkippedGuestAccount' }
         $message = 'Operator skipped the rejected guest account for this run.'
     }
     else {
         $script:Wizard.GuestCredential = $null
-        Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'status' -Value 'Stopped'
-        Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'stopReason' -Value 'Operator stopped after guest credential rejection.'
+        Set-PatchValue -InputObject $script:Wizard.RunState -Name 'status' -Value 'Stopped'
+        Set-PatchValue -InputObject $script:Wizard.RunState -Name 'stopReason' -Value 'Operator stopped after guest credential rejection.'
         $message = 'Operator stopped after guest credential rejection.'
     }
     Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
@@ -701,7 +620,7 @@ function Start-WizardAction {
             Refresh-WizardRebootGrid
             $pending = @(Get-WizardPendingRebootVms)
             if ($pending.Count -eq 0) { throw 'No VM currently has a pending reboot.' }
-            $names = @($pending | ForEach-Object { [string](Get-WizardProperty $_ @('vmName') '') })
+            $names = @($pending | ForEach-Object { [string](Get-PatchValue $_ @('vmName') '') })
             $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, ('Approve reboot for pending VM(s): {0}' -f ($names -join ', ')), 'Approve reboot', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
             if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         }
@@ -713,9 +632,6 @@ function Start-WizardAction {
         $workerScript = {
             param($ControllerPath, $ActionName, $RunFilePath, $VCenterCredential, $GuestCredential)
             try {
-                if ($null -eq (Get-Command -Name 'Connect-VIServer' -ErrorAction SilentlyContinue)) {
-                    Import-Module -Name 'VMware.VimAutomation.Core' -ErrorAction Stop
-                }
                 . $ControllerPath
                 return (Invoke-PatchAction -Action $ActionName -RunPath $RunFilePath -VCenterCredential $VCenterCredential -GuestCredential $GuestCredential)
             }
@@ -770,7 +686,7 @@ function Complete-WizardAction {
     }
 
     if ($null -ne $result) {
-        $resultStatus = [string](Get-WizardProperty $result @('status') 'Unknown')
+        $resultStatus = [string](Get-PatchValue $result @('status') 'Unknown')
         $credentialDecision = Resolve-WizardCredentialRejection -Action $action
         if ($credentialDecision -eq 'Retry') {
             Start-WizardAction -Action $action -ApprovalAlreadyGiven
@@ -801,27 +717,27 @@ function Start-WizardNewRound {
         if ($null -eq $script:Wizard.RunState) { throw 'Create or resume a run first.' }
         $unresolvedMutatingStep = Get-WizardUnresolvedMutatingStep
         if ($null -ne $unresolvedMutatingStep) {
-            $action = [string](Get-WizardProperty $unresolvedMutatingStep @('action') 'mutating')
+            $action = [string](Get-PatchValue $unresolvedMutatingStep @('action') 'mutating')
             Set-WizardStatus -Message ('The started {0} step has no final result. Check the guest, then use Mark steps reviewed.' -f $action)
             return
         }
         $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, 'Start a new round? This clears the current offered update lists and selections. Run Scan again to obtain a fresh selection.', 'Start another round', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-        $round = [int](Get-WizardProperty $script:Wizard.RunState @('currentRound') 1) + 1
-        Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'currentRound' -Value $round
-        Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'selectedUpdates' -Value @()
-        Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'currentAction' -Value $null
-        foreach ($vm in @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()))) {
-            Set-WizardProperty -InputObject $vm -Name 'currentRound' -Value $round
-            Set-WizardProperty -InputObject $vm -Name 'availableUpdates' -Value @()
-            Set-WizardProperty -InputObject $vm -Name 'selectedUpdates' -Value @()
-            Set-WizardProperty -InputObject $vm -Name 'selectionSaved' -Value $false
-            Set-WizardProperty -InputObject $vm -Name 'pendingUpdates' -Value @()
-            Set-WizardProperty -InputObject $vm -Name 'reboot' -Value ([pscustomobject]@{ status = 'NotRequested'; required = $false; baselineBootTime = $null; requestEvidence = $null; confirmedBootTime = $null })
+        $round = [int](Get-PatchValue $script:Wizard.RunState @('currentRound') 1) + 1
+        Set-PatchValue -InputObject $script:Wizard.RunState -Name 'currentRound' -Value $round
+        Set-PatchValue -InputObject $script:Wizard.RunState -Name 'selectedUpdates' -Value @()
+        Set-PatchValue -InputObject $script:Wizard.RunState -Name 'currentAction' -Value $null
+        foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
+            Set-PatchValue -InputObject $vm -Name 'currentRound' -Value $round
+            Set-PatchValue -InputObject $vm -Name 'availableUpdates' -Value @()
+            Set-PatchValue -InputObject $vm -Name 'selectedUpdates' -Value @()
+            Set-PatchValue -InputObject $vm -Name 'selectionSaved' -Value $false
+            Set-PatchValue -InputObject $vm -Name 'pendingUpdates' -Value @()
+            Set-PatchValue -InputObject $vm -Name 'reboot' -Value ([pscustomobject]@{ status = 'NotRequested'; required = $false; baselineBootTime = $null; requestEvidence = $null; confirmedBootTime = $null })
             # A skipped guest account stays skipped for the rest of the run.
-            if ([string](Get-WizardProperty $vm @('status') '') -ne 'SkippedGuestAccount') { Set-WizardProperty -InputObject $vm -Name 'status' -Value 'Pending' }
-            Set-WizardProperty -InputObject $vm -Name 'currentAction' -Value $null
-            Set-WizardProperty -InputObject $vm -Name 'agentStatus' -Value $null
+            if ([string](Get-PatchValue $vm @('status') '') -ne 'SkippedGuestAccount') { Set-PatchValue -InputObject $vm -Name 'status' -Value 'Pending' }
+            Set-PatchValue -InputObject $vm -Name 'currentAction' -Value $null
+            Set-PatchValue -InputObject $vm -Name 'agentStatus' -Value $null
         }
         Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
         Refresh-WizardVmGrid
@@ -839,9 +755,9 @@ function Set-WizardStepsReviewed {
     try {
         if ($null -eq $script:Wizard.RunState) { throw 'Create or resume a run first.' }
         $blocked = @()
-        foreach ($vm in @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()))) {
+        foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
             $step = Get-PatchMutatingStepBlocker -RunState $script:Wizard.RunState -VMRecord $vm -CurrentStep $null
-            if ($null -ne $step) { $blocked += [pscustomobject]@{ VmName = [string](Get-WizardProperty $vm @('vmName') ''); Step = $step } }
+            if ($null -ne $step) { $blocked += [pscustomobject]@{ VmName = [string](Get-PatchValue $vm @('vmName') ''); Step = $step } }
         }
         if ($blocked.Count -eq 0) {
             Set-WizardStatus -Message 'There are no unresolved install or reboot steps.'
@@ -852,7 +768,7 @@ function Set-WizardStepsReviewed {
         $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, $prompt, 'Mark steps as reviewed', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         foreach ($item in $blocked) {
-            Set-WizardProperty -InputObject $item.Step -Name 'status' -Value 'Reviewed'
+            Set-PatchValue -InputObject $item.Step -Name 'status' -Value 'Reviewed'
             Write-PatchEvent -RunPath $script:Wizard.RunPath -Message ('Operator marked the unresolved {0} step as reviewed.' -f $item.Step.action) -VMName $item.VmName -Step $item.Step.action -Level 'WARN'
         }
         Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
@@ -869,7 +785,7 @@ function Finish-WizardRun {
         if ($null -eq $script:Wizard.RunState) { throw 'Create or resume a run first.' }
         $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, 'Finish this run and write the current summary files?', 'Finish patch run', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-        Set-WizardProperty -InputObject $script:Wizard.RunState -Name 'status' -Value 'Finished'
+        Set-PatchValue -InputObject $script:Wizard.RunState -Name 'status' -Value 'Finished'
         Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
         Write-PatchSummary -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState
         Set-WizardStatus -Message 'Run finished. Summary files are available in the run folder.'
@@ -949,10 +865,6 @@ function Initialize-WizardUi {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     [System.Windows.Forms.Application]::EnableVisualStyles()
-
-    if ($null -eq (Get-Command -Name 'New-PatchRun' -ErrorAction SilentlyContinue)) {
-        throw ('The patch controller was not found or could not be loaded: {0}' -f $script:ControllerPath)
-    }
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = 'Windows Patch Wizard'

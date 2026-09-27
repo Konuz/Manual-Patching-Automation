@@ -53,22 +53,22 @@ function Get-PatchVM {
     )
 
     if (-not [string]::IsNullOrWhiteSpace($SavedId)) {
-        $matches = @(Get-VM -Id $SavedId -Server $Server -ErrorAction Stop)
+        $found = @(Get-VM -Id $SavedId -Server $Server -ErrorAction Stop)
     }
     else {
         # Get-VM treats -Name as a wildcard pattern. Escape it before the lookup and
         # keep the literal comparison below as the final identity check.
         $escapedName = [System.Management.Automation.WildcardPattern]::Escape($Name)
-        $matches = @(Get-VM -Name $escapedName -Server $Server -ErrorAction Stop | Where-Object {
+        $found = @(Get-VM -Name $escapedName -Server $Server -ErrorAction Stop | Where-Object {
                 [string]::Equals([string]$_.Name, $Name, [System.StringComparison]::OrdinalIgnoreCase)
             })
     }
 
-    if ($matches.Count -ne 1) {
-        throw ('Expected exactly one VM named {0}; found {1}.' -f $Name, $matches.Count)
+    if ($found.Count -ne 1) {
+        throw ('Expected exactly one VM named {0}; found {1}.' -f $Name, $found.Count)
     }
 
-    $vm = $matches[0]
+    $vm = $found[0]
     if (-not [string]::Equals([string]$vm.Name, $Name, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw ('Saved VM identity does not match the requested name {0}.' -f $Name)
     }
@@ -99,8 +99,6 @@ function Get-PatchVM {
         throw ('VMware Tools are not running on {0}. ToolsRunningStatus: {1}' -f $Name, $guest.ToolsRunningStatus)
     }
 
-    # Keep the exact VIServer object with the VM for Guest Operations.
-    $vm | Add-Member -MemberType NoteProperty -Name PatchServer -Value $Server -Force | Out-Null
     return $vm
 }
 
@@ -122,24 +120,6 @@ function Get-GuestContext {
     $client = $vmView.Client
     if ($null -eq $client -or $null -eq $client.ServiceContent) {
         throw 'The VM view does not expose its vCenter client.'
-    }
-
-    $server = $null
-    foreach ($propertyName in @('PatchServer', 'VIServer', 'Server')) {
-        $property = $VM.PSObject.Properties[$propertyName]
-        if ($null -ne $property -and $null -ne $property.Value) {
-            $server = $property.Value
-            break
-        }
-    }
-    if ($null -eq $server) {
-        $serviceUrl = [string]$client.ServiceUrl
-        if (-not [string]::IsNullOrWhiteSpace($serviceUrl)) {
-            $server = ([uri]$serviceUrl).Host
-        }
-    }
-    if ($null -eq $server) {
-        throw 'The VM has no vCenter server scope for Guest Operations.'
     }
 
     $guestOperationsReference = $client.ServiceContent.GuestOperationsManager
@@ -204,8 +184,6 @@ function Get-GuestContext {
         VM = $VM
         VMView = $vmView
         Client = $client
-        Server = $server
-        GuestCredential = $GuestCredential
         GuestAuth = $guestAuthentication
         ProcessManager = $processManager
         FileManager = $fileManager

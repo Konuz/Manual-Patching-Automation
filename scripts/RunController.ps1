@@ -6,6 +6,7 @@
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'GuestOps.ps1')
 
 $script:PatchSensitiveValues = @()
 
@@ -57,16 +58,7 @@ function Set-PatchValue {
 
 function Get-PatchArray {
     param($Value)
-
-    if ($null -eq $Value) {
-        return @()
-    }
-    if ($Value -is [string]) {
-        return @($Value)
-    }
-    if ($Value -is [System.Collections.IEnumerable]) {
-        return @($Value)
-    }
+    if ($null -eq $Value) { return @() }
     return @($Value)
 }
 
@@ -238,88 +230,30 @@ function New-PatchRun {
         [Parameter(Mandatory = $true)]$VMEntries
     )
 
-    $optionsSource = Get-PatchValue -InputObject $Config -Names @('Options', 'options') -Default $null
-    $getConfigValue = {
-        param([string[]]$Names, $Default)
-        $value = Get-PatchValue -InputObject $optionsSource -Names $Names -Default $null
-        if ($null -eq $value) {
-            $value = Get-PatchValue -InputObject $Config -Names $Names -Default $Default
-        }
-        if ($null -eq $value) {
-            return $Default
-        }
-        return $value
-    }
-
-    $runIdText = [string](Get-PatchValue -InputObject $Config -Names @('RunId', 'runId') -Default '')
-    $runId = [Guid]::NewGuid()
-    if (-not [string]::IsNullOrWhiteSpace($runIdText)) {
-        try { $runId = [Guid]$runIdText } catch { throw 'Config.RunId is not a valid GUID.' }
-    }
-
-    $root = [string](Get-PatchValue -InputObject $Config -Names @('RunsRoot', 'RunRoot', 'OutputRoot', 'ResultsRoot', 'OutputDirectory') -Default '')
-    if ([string]::IsNullOrWhiteSpace($root)) {
-        $root = Join-Path (Split-Path -Parent $PSScriptRoot) 'runs'
-    }
-    if ($root.EndsWith('.json', [System.StringComparison]::OrdinalIgnoreCase)) {
-        $root = Split-Path -Parent $root
-    }
-    $runDirectory = Join-Path $root $runId.ToString('D')
+    # Config comes from the GUI: VCenter, OutputRoot and Options (missing options use the plan defaults).
+    $options = Get-PatchValue $Config @('Options') $null
+    $option = { param([string]$Name, $Default) $value = Get-PatchValue $options @($Name) $null; if ($null -eq $value) { $Default } else { $value } }
+    $vCenter = [string](Get-PatchValue $Config @('VCenter') '')
+    $root = [string](Get-PatchValue $Config @('OutputRoot') '')
+    if ([string]::IsNullOrWhiteSpace($root)) { $root = Join-Path (Split-Path -Parent $PSScriptRoot) 'runs' }
+    $runId = [Guid]::NewGuid().ToString('D')
+    $runDirectory = Join-Path $root $runId
     $runJsonPath = Join-Path $runDirectory 'run.json'
-    if (-not (Test-Path -LiteralPath $runDirectory -PathType Container)) {
-        New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
-    }
-
-    $vCenter = Get-PatchValue -InputObject $Config -Names @('VCenter', 'vCenter', 'VCenterServer', 'ServerName', 'Server') -Default ''
-    if ($vCenter -isnot [string]) {
-        $vCenter = Get-PatchValue -InputObject $vCenter -Names @('ServerName', 'Name', 'Address') -Default ([string]$vCenter)
-    }
-
-    $scanConcurrency = [int](& $getConfigValue @('ScanConcurrency', 'scanConcurrency') 3)
-    $installConcurrency = [int](& $getConfigValue @('InstallConcurrency', 'installConcurrency') 3)
-    $rebootBatch = [int](& $getConfigValue @('RebootBatchSize', 'rebootBatchSize') 1)
-    $scanLimit = [int](& $getConfigValue @('ScanTimeoutMinutes', 'scanTimeoutMinutes') 30)
-    $installLimit = [int](& $getConfigValue @('InstallTimeoutMinutes', 'installTimeoutMinutes') 180)
-    $rebootLimit = [int](& $getConfigValue @('RebootConfirmationTimeoutMinutes', 'rebootConfirmationTimeoutMinutes') 30)
-
-    if ($scanConcurrency -lt 1) { $scanConcurrency = 3 }
-    if ($installConcurrency -lt 1) { $installConcurrency = 3 }
-    if ($rebootBatch -lt 1) { $rebootBatch = 1 }
-    if ($scanLimit -lt 1) { $scanLimit = 30 }
-    if ($installLimit -lt 1) { $installLimit = 180 }
-    if ($rebootLimit -lt 1) { $rebootLimit = 30 }
-
-    $ignoreVCenter = [bool](& $getConfigValue @('IgnoreVCenterCertificate', 'ignoreVCenterCertificate') $false)
-    $ignoreEsxi = [bool](& $getConfigValue @('IgnoreEsxiCertificatesForFileTransfers', 'ignoreEsxiCertificatesForFileTransfers', 'IgnoreEsxiCertificate') $false)
+    New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
 
     $vmRecords = @()
     $seenVmNames = @{}
-    foreach ($entry in @(Get-PatchArray -Value $VMEntries)) {
-        $name = [string]$entry
-        $expectedFqdn = ''
-        $savedId = $null
-        $entryVCenter = [string]$vCenter
-        if ($entry -isnot [string]) {
-            $name = [string](Get-PatchValue -InputObject $entry -Names @('VmName', 'VMName', 'Name') -Default '')
-            $expectedFqdn = [string](Get-PatchValue -InputObject $entry -Names @('ExpectedFqdn', 'ExpectedFQDN', 'Fqdn', 'FQDN') -Default '')
-            $savedId = [string](Get-PatchValue -InputObject $entry -Names @('SavedId', 'VmId', 'VMId', 'Id', 'Uid') -Default '')
-            $entryVCenter = [string](Get-PatchValue -InputObject $entry -Names @('VCenter', 'vCenter', 'VCenterServer', 'ServerName') -Default $vCenter)
-        }
-        if ([string]::IsNullOrWhiteSpace($entryVCenter)) { $entryVCenter = [string]$vCenter }
-        if ([string]::IsNullOrWhiteSpace($name)) {
-            throw 'Each VM entry requires a VM name.'
-        }
-        $duplicateKey = ([string]$entryVCenter).Trim().ToLowerInvariant() + '|' + $name.Trim().ToLowerInvariant()
-        if ($seenVmNames.ContainsKey($duplicateKey)) {
-            throw ('Duplicate VM name {0} was supplied for vCenter {1}.' -f $name, $entryVCenter)
-        }
-        $seenVmNames[$duplicateKey] = $true
+    foreach ($entry in @($VMEntries)) {
+        $name = [string]$entry.VmName
+        if ([string]::IsNullOrWhiteSpace($name)) { throw 'Each VM entry requires a VM name.' }
+        if ($seenVmNames.ContainsKey($name)) { throw ('Duplicate VM name {0}.' -f $name) }
+        $seenVmNames[$name] = $true
+        $expectedFqdn = [string]$entry.ExpectedFqdn
 
         $vmRecords += [ordered]@{
             vmName = $name
             expectedFqdn = $expectedFqdn
-            vmId = if ([string]::IsNullOrWhiteSpace($savedId)) { $null } else { $savedId }
-            vCenter = $entryVCenter
+            vmId = $null
             status = 'Pending'
             currentRound = 1
             currentAction = $null
@@ -339,21 +273,21 @@ function New-PatchRun {
 
     $state = [ordered]@{
         schemaVersion = 'patch-run-v1'
-        runId = $runId.ToString('D')
+        runId = $runId
         createdAt = Get-PatchUtcNow
         updatedAt = Get-PatchUtcNow
         status = 'Created'
-        vCenter = [string]$vCenter
+        vCenter = $vCenter
         options = [ordered]@{
-            ignoreVCenterCertificate = $ignoreVCenter
-            ignoreEsxiCertificatesForFileTransfers = $ignoreEsxi
-            scanConcurrency = $scanConcurrency
-            installConcurrency = $installConcurrency
-            rebootBatchSize = $rebootBatch
+            ignoreVCenterCertificate = [bool](& $option 'IgnoreVCenterCertificate' $false)
+            ignoreEsxiCertificatesForFileTransfers = [bool](& $option 'IgnoreEsxiCertificatesForFileTransfers' $false)
+            scanConcurrency = [int](& $option 'ScanConcurrency' 3)
+            installConcurrency = [int](& $option 'InstallConcurrency' 3)
+            rebootBatchSize = [int](& $option 'RebootBatchSize' 1)
             limits = [ordered]@{
-                scanTimeoutMinutes = $scanLimit
-                installTimeoutMinutes = $installLimit
-                rebootConfirmationTimeoutMinutes = $rebootLimit
+                scanTimeoutMinutes = [int](& $option 'ScanTimeoutMinutes' 30)
+                installTimeoutMinutes = [int](& $option 'InstallTimeoutMinutes' 180)
+                rebootConfirmationTimeoutMinutes = [int](& $option 'RebootConfirmationTimeoutMinutes' 30)
             }
         }
         currentRound = 1
@@ -498,69 +432,6 @@ function Get-PatchLimit {
     $options = Get-PatchValue -InputObject $RunState -Names @('options') -Default $null
     $limits = Get-PatchValue -InputObject $options -Names @('limits') -Default $null
     return [int](Get-PatchValue -InputObject $limits -Names @($Name) -Default $Default)
-}
-
-function Get-PatchVmId {
-    param($VM)
-    $id = [string](Get-PatchValue -InputObject $VM -Names @('Id', 'VmId', 'Uid') -Default '')
-    if ([string]::IsNullOrWhiteSpace($id)) {
-        $extension = Get-PatchValue -InputObject $VM -Names @('ExtensionData') -Default $null
-        $moref = Get-PatchValue -InputObject $extension -Names @('MoRef') -Default $null
-        $id = [string](Get-PatchValue -InputObject $moref -Names @('Value') -Default '')
-    }
-    return $id
-}
-
-function Get-PatchGuestFqdn {
-    param($VM, $Context)
-    foreach ($candidate in @($Context, $VM, (Get-PatchValue $Context @('VM') $null), (Get-PatchValue $VM @('ExtensionData') $null))) {
-        $fqdn = [string](Get-PatchValue -InputObject $candidate -Names @('Fqdn', 'FQDN', 'GuestFqdn', 'GuestFQDN', 'HostName') -Default '')
-        if (-not [string]::IsNullOrWhiteSpace($fqdn)) { return $fqdn.Trim().TrimEnd('.') }
-        $guest = Get-PatchValue -InputObject $candidate -Names @('Guest') -Default $null
-        $fqdn = [string](Get-PatchValue -InputObject $guest -Names @('HostName') -Default '')
-        if (-not [string]::IsNullOrWhiteSpace($fqdn)) { return $fqdn.Trim().TrimEnd('.') }
-    }
-    return $null
-}
-
-function Get-PatchToolsRunning {
-    param($Context)
-    foreach ($candidate in @($Context, (Get-PatchValue $Context @('VM') $null), (Get-PatchValue (Get-PatchValue $Context @('VM') $null) @('ExtensionData') $null))) {
-        $value = Get-PatchValue -InputObject $candidate -Names @('ToolsRunning', 'ToolsRunningStatus') -Default $null
-        if ($null -ne $value) {
-            return ([bool]$value -or [string]::Equals([string]$value, 'guestToolsRunning', [System.StringComparison]::OrdinalIgnoreCase))
-        }
-        $guest = Get-PatchValue -InputObject $candidate -Names @('Guest') -Default $null
-        $value = Get-PatchValue -InputObject $guest -Names @('ToolsRunning', 'ToolsRunningStatus') -Default $null
-        if ($null -ne $value) {
-            return ([bool]$value -or [string]::Equals([string]$value, 'guestToolsRunning', [System.StringComparison]::OrdinalIgnoreCase))
-        }
-    }
-    return $false
-}
-
-function Get-PatchClusterMembership {
-    param($Context, $Status)
-    foreach ($candidate in @($Context, $Status)) {
-        $value = Get-PatchValue -InputObject $candidate -Names @('clusterMembership', 'ClusterMembership') -Default $null
-        if ($null -ne $value) { return [string]$value }
-        $cluster = Get-PatchValue -InputObject $candidate -Names @('cluster') -Default $null
-        $value = Get-PatchValue -InputObject $cluster -Names @('membership') -Default $null
-        if ($null -ne $value) { return [string]$value }
-    }
-    return $null
-}
-
-function Assert-PatchGuestIdentity {
-    param($VMRecord, $VM, $Context)
-    $expected = ([string](Get-PatchValue $VMRecord @('expectedFqdn') '')).Trim().TrimEnd('.')
-    $actual = Get-PatchGuestFqdn -VM $VM -Context $Context
-    if ([string]::IsNullOrWhiteSpace($expected)) {
-        throw 'The run has no expected guest FQDN for this VM.'
-    }
-    if ([string]::IsNullOrWhiteSpace($actual) -or -not [string]::Equals($expected, $actual, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw ('Guest FQDN mismatch. Expected {0}; observed {1}.' -f $expected, $actual)
-    }
 }
 
 function New-PatchStep {
@@ -727,30 +598,16 @@ function Get-PatchGuestPaths {
 
 function Test-PatchVmRequiresReboot {
     param($VMRecord)
-
-    $reboot = Get-PatchValue -InputObject $VMRecord -Names @('reboot') -Default $null
-    $rebootStatus = [string](Get-PatchValue -InputObject $reboot -Names @('status') -Default 'NotRequested')
-    if ($rebootStatus -eq 'Confirmed') { return $false }
-    $explicit = Get-PatchValue -InputObject $reboot -Names @('required', 'pending', 'needsReboot') -Default $null
-    if ($null -ne $explicit -and [bool]$explicit) { return $true }
-
-    $agentStatus = Get-PatchValue -InputObject $VMRecord -Names @('agentStatus') -Default $null
-    $system = Get-PatchValue -InputObject $agentStatus -Names @('system') -Default $null
-    $pending = Get-PatchValue -InputObject (Get-PatchValue -InputObject $system -Names @('pendingReboot') -Default $null) -Names @('isPending') -Default $null
-    if ($null -ne $pending) { return [bool]$pending }
-    foreach ($update in @(Get-PatchArray -Value (Get-PatchValue -InputObject $VMRecord -Names @('installedUpdates') -Default @()))) {
-        $required = Get-PatchValue -InputObject $update -Names @('rebootRequired', 'requiresReboot') -Default $null
-        if ($null -ne $required -and [bool]$required) { return $true }
-    }
-    return $false
+    $reboot = Get-PatchValue $VMRecord @('reboot') $null
+    return ([bool](Get-PatchValue $reboot @('required') $false) -and [string](Get-PatchValue $reboot @('status') '') -ne 'Confirmed')
 }
 
 function Write-PatchSelectionFile {
     param([string]$Path, $VMRecord)
     $selection = New-Object 'System.Collections.Generic.List[object]'
     foreach ($item in @(Get-PatchArray -Value (Get-PatchValue $VMRecord @('selectedUpdates') @()))) {
-        $id = [string](Get-PatchValue $item @('updateId', 'UpdateId', 'id') '')
-        $revision = Get-PatchValue $item @('revisionNumber', 'RevisionNumber', 'revision') $null
+        $id = [string](Get-PatchValue $item @('updateId') '')
+        $revision = Get-PatchValue $item @('revisionNumber') $null
         if ([string]::IsNullOrWhiteSpace($id) -or $null -eq $revision) { continue }
         [void]$selection.Add([ordered]@{ updateId = $id; revisionNumber = [int64]$revision })
     }
@@ -764,89 +621,31 @@ function Update-PatchVmFromAgentStatus {
 
     if ($null -eq $Status) { return }
     Set-PatchValue -InputObject $VMRecord -Name 'agentStatus' -Value $Status
-    $updates = @(Get-PatchArray -Value (Get-PatchValue -InputObject $Status -Names @('updates') -Default @()))
+    $updates = @(Get-PatchArray (Get-PatchValue $Status @('updates') @()))
+    $system = Get-PatchValue $Status @('system') $null
+    $pendingReboot = [bool](Get-PatchValue (Get-PatchValue $system @('pendingReboot') $null) @('isPending') $false)
+    $reboot = Get-PatchValue $VMRecord @('reboot') $null
+
     if ($Action -eq 'Scan' -or $Action -eq 'Verify') {
         Set-PatchValue -InputObject $VMRecord -Name 'availableUpdates' -Value $updates
         Set-PatchValue -InputObject $VMRecord -Name 'pendingUpdates' -Value $updates
-        $system = Get-PatchValue -InputObject $Status -Names @('system') -Default $null
-        $pendingReboot = Get-PatchValue -InputObject (Get-PatchValue -InputObject $system -Names @('pendingReboot') -Default $null) -Names @('isPending') -Default $null
-        if ($null -ne $pendingReboot) {
-            $reboot = Get-PatchValue -InputObject $VMRecord -Names @('reboot') -Default ([pscustomobject]@{})
-            $rebootRequired = [bool]$pendingReboot
-            $rebootStatus = [string](Get-PatchValue $reboot @('status') 'NotRequested')
-            Set-PatchValue -InputObject $reboot -Name 'required' -Value $rebootRequired
-            if ($rebootRequired) {
-                if ($rebootStatus -eq 'NotRequested' -or $rebootStatus -eq 'SkippedNoReboot' -or $rebootStatus -eq 'Confirmed') {
-                    Set-PatchValue -InputObject $reboot -Name 'status' -Value 'Pending'
-                }
-            }
-            elseif ($rebootStatus -ne 'Confirmed') {
-                Set-PatchValue -InputObject $reboot -Name 'status' -Value 'NotRequested'
-            }
-            Set-PatchValue -InputObject $VMRecord -Name 'reboot' -Value $reboot
-        }
+        # A fresh scan is the current truth about a pending reboot.
+        Set-PatchValue -InputObject $reboot -Name 'required' -Value $pendingReboot
+        Set-PatchValue -InputObject $reboot -Name 'status' -Value $(if ($pendingReboot) { 'Pending' } else { 'NotRequested' })
+        return
     }
+
     if ($Action -eq 'Install') {
-        $installedNow = @($updates | Where-Object {
-                $result = Get-PatchValue -InputObject (Get-PatchValue -InputObject $_ -Names @('installResult') -Default $null) -Names @('resultCode') -Default $null
-                $null -ne $result -and [int]$result -eq 2
-        })
-        $skipped = @(Get-PatchArray -Value (Get-PatchValue -InputObject $Status -Names @('skipped') -Default @()))
-        $installed = @()
-        $installedCandidates = @()
-        $installedCandidates += @(Get-PatchArray -Value (Get-PatchValue $VMRecord @('installedUpdates') @()))
-        $installedCandidates += $installedNow
-        foreach ($candidate in $installedCandidates) {
-            $candidateId = [string](Get-PatchValue $candidate @('updateId', 'UpdateId', 'id') '')
-            $candidateRevision = [string](Get-PatchValue $candidate @('revisionNumber', 'RevisionNumber', 'revision') '')
-            $alreadyInstalled = $false
-            if (-not [string]::IsNullOrWhiteSpace($candidateId)) {
-                foreach ($existing in @($installed)) {
-                    if ([string]::Equals([string](Get-PatchValue $existing @('updateId', 'UpdateId', 'id') ''), $candidateId, [System.StringComparison]::OrdinalIgnoreCase) -and
-                        [string]::Equals([string](Get-PatchValue $existing @('revisionNumber', 'RevisionNumber', 'revision') ''), $candidateRevision, [System.StringComparison]::Ordinal)) {
-                        $alreadyInstalled = $true
-                        break
-                    }
-                }
-            }
-            if (-not $alreadyInstalled) { $installed += $candidate }
-        }
-        $mergedSkipped = @()
-        $skippedCandidates = @()
-        $skippedCandidates += @(Get-PatchArray -Value (Get-PatchValue $VMRecord @('skippedUpdates') @()))
-        $skippedCandidates += $skipped
-        foreach ($candidate in $skippedCandidates) {
-            $candidateId = [string](Get-PatchValue $candidate @('updateId', 'UpdateId', 'id') '')
-            $candidateRevision = [string](Get-PatchValue $candidate @('revisionNumber', 'RevisionNumber', 'revision') '')
-            $alreadySkipped = $false
-            if (-not [string]::IsNullOrWhiteSpace($candidateId)) {
-                foreach ($existing in @($mergedSkipped)) {
-                    if ([string]::Equals([string](Get-PatchValue $existing @('updateId', 'UpdateId', 'id') ''), $candidateId, [System.StringComparison]::OrdinalIgnoreCase) -and
-                        [string]::Equals([string](Get-PatchValue $existing @('revisionNumber', 'RevisionNumber', 'revision') ''), $candidateRevision, [System.StringComparison]::Ordinal)) {
-                        $alreadySkipped = $true
-                        break
-                    }
-                }
-            }
-            if (-not $alreadySkipped) { $mergedSkipped += $candidate }
-        }
-        Set-PatchValue -InputObject $VMRecord -Name 'installedUpdates' -Value $installed
-        Set-PatchValue -InputObject $VMRecord -Name 'skippedUpdates' -Value $mergedSkipped
-        Set-PatchValue -InputObject $VMRecord -Name 'pendingUpdates' -Value @($updates | Where-Object {
-                $result = Get-PatchValue -InputObject (Get-PatchValue -InputObject $_ -Names @('installResult') -Default $null) -Names @('resultCode') -Default $null
-                $null -eq $result -or [int]$result -ne 2
-        })
-        $aggregateInstall = Get-PatchValue -InputObject $Status -Names @('installResult') -Default $null
-        $rebootRequired = [bool](Get-PatchValue -InputObject $aggregateInstall -Names @('rebootRequired') -Default $false)
-        $rebootRequired = $rebootRequired -or (@($updates | Where-Object {
-                $result = Get-PatchValue -InputObject $_ -Names @('installResult') -Default $null
-                [bool](Get-PatchValue -InputObject $result -Names @('rebootRequired') -Default $false)
-            }).Count -gt 0)
-        if ($rebootRequired) {
-            $reboot = Get-PatchValue -InputObject $VMRecord -Names @('reboot') -Default ([pscustomobject]@{})
+        # WUA result code 2 = succeeded.
+        $isInstalled = { [int](Get-PatchValue (Get-PatchValue $args[0] @('installResult') $null) @('resultCode') 0) -eq 2 }
+        $installedNow = @($updates | Where-Object { & $isInstalled $_ })
+        Set-PatchValue -InputObject $VMRecord -Name 'installedUpdates' -Value @(@(Get-PatchArray (Get-PatchValue $VMRecord @('installedUpdates') @())) + $installedNow)
+        Set-PatchValue -InputObject $VMRecord -Name 'skippedUpdates' -Value @(@(Get-PatchArray (Get-PatchValue $VMRecord @('skippedUpdates') @())) + @(Get-PatchArray (Get-PatchValue $Status @('skipped') @())))
+        Set-PatchValue -InputObject $VMRecord -Name 'pendingUpdates' -Value @($updates | Where-Object { -not (& $isInstalled $_) })
+        $installReboot = [bool](Get-PatchValue (Get-PatchValue $Status @('installResult') $null) @('rebootRequired') $false)
+        if ($installReboot -or $pendingReboot) {
             Set-PatchValue -InputObject $reboot -Name 'required' -Value $true
-            if ([string](Get-PatchValue $reboot @('status') 'NotRequested') -eq 'NotRequested') { Set-PatchValue -InputObject $reboot -Name 'status' -Value 'Pending' }
-            Set-PatchValue -InputObject $VMRecord -Name 'reboot' -Value $reboot
+            Set-PatchValue -InputObject $reboot -Name 'status' -Value 'Pending'
         }
     }
 }
@@ -855,6 +654,7 @@ function Wait-PatchAgent {
     param(
         [Parameter(Mandatory = $true)]$Context,
         [Parameter(Mandatory = $true)]$RunState,
+        [Parameter(Mandatory = $true)]$VMRecord,
         [Parameter(Mandatory = $true)]$Step,
         [Parameter(Mandatory = $true)][string]$RunPath,
         [Parameter(Mandatory = $true)][int]$TimeoutMinutes
@@ -863,9 +663,7 @@ function Wait-PatchAgent {
     $runId = [Guid](Get-PatchValue $RunState @('runId') '')
     $stepId = [Guid](Get-PatchValue $Step @('stepId') '')
     $mode = [string](Get-PatchValue $Step @('agentMode') '')
-    $paths = Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord ([pscustomobject]@{ vmName = 'agent' }) -Step $Step
-    $vmName = [string](Get-PatchValue (Get-PatchValue $Context @('VM') $null) @('Name') 'vm')
-    $paths = [pscustomobject]@{ status = Join-Path (Get-PatchRunDirectory $RunPath) ('status-{0}-{1}.json' -f (($vmName -replace '[^a-zA-Z0-9_.-]', '_')), $stepId.ToString('D')); selection = $paths.selection; agentLog = Join-Path (Get-PatchRunDirectory $RunPath) ('agent-{0}-{1}.log' -f (($vmName -replace '[^a-zA-Z0-9_.-]', '_')), $stepId.ToString('D')) }
+    $paths = Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step
     $deadlineText = [string](Get-PatchValue $Step @('deadlineAt') '')
     $deadline = $null
     if (-not [string]::IsNullOrWhiteSpace($deadlineText)) {
@@ -888,16 +686,7 @@ function Wait-PatchAgent {
         $firstPoll = $false
         $status = $null
         try {
-            $statusParameters = @{
-                Context = $Context
-                RunId = $runId
-                StepId = $stepId
-                LocalPath = $paths.status
-                IgnoreEsxiCertificate = [bool](Get-PatchOption -RunState $RunState -Names @('ignoreEsxiCertificatesForFileTransfers') -Default $false)
-            }
-            $statusCommand = Get-Command -Name 'Read-GuestStatus' -ErrorAction Stop
-            if ($statusCommand.Parameters.ContainsKey('ExpectedMode')) { $statusParameters.ExpectedMode = $mode }
-            $status = Read-GuestStatus @statusParameters
+            $status = Read-GuestStatus -Context $Context -RunId $runId -StepId $stepId -ExpectedMode $mode -LocalPath $paths.status -IgnoreEsxiCertificate ([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false))
         }
         catch {
             $lastError = $_.Exception.Message
@@ -1035,7 +824,7 @@ function Invoke-PatchAgentStep {
         return [pscustomobject]@{ status = 'Started'; step = $step; agentStatus = Get-PatchValue $step @('agentStatus') $null; error = $null }
     }
 
-    $waitResult = Wait-PatchAgent -Context $Context -RunState $RunState -Step $step -RunPath $RunPath -TimeoutMinutes $TimeoutMinutes
+    $waitResult = Wait-PatchAgent -Context $Context -RunState $RunState -VMRecord $VMRecord -Step $step -RunPath $RunPath -TimeoutMinutes $TimeoutMinutes
     try {
         $guestLogPath = Join-Path (Get-PatchGuestPaths -Context $Context -RunState $RunState -Step $step).directory 'agent.log'
         $agentLogLocalPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $step).agentLog
@@ -1109,12 +898,11 @@ function Invoke-PatchRebootConfirmation {
             else {
                 $context = Get-GuestContext -VM $vm -GuestCredential $GuestCredential
             }
-            Assert-PatchGuestIdentity -VMRecord $VMRecord -VM $vm -Context $context
-            [void](Read-PatchRebootEvidence -RunPath $RunPath -RunState $RunState -Step $Step -Context $context)
+            [void](Read-PatchRebootEvidence -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Step $Step -Context $context)
             $failedResult = Get-PatchRebootFailureResult -Step $Step -RunId $runIdText -StepId $stepIdText
             if ($null -ne $failedResult) { return $failedResult }
             $hasRebootEvidence = $hasRebootEvidence -or (Test-PatchRebootRequestStatus -Status (Get-PatchValue $Step @('agentStatus') $null) -RunId $runIdText -StepId $stepIdText)
-            if ($hasRebootEvidence -and (Get-PatchToolsRunning -Context $context)) {
+            if ($hasRebootEvidence) {
                 $currentBoot = [string](Read-GuestBootTime -Context $context -IgnoreEsxiCertificate ([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)))
                 $currentDate = $null
                 try { $currentDate = [datetime]::Parse($currentBoot).ToUniversalTime() } catch { }
@@ -1155,25 +943,14 @@ function Invoke-PatchRebootConfirmation {
 }
 
 function Read-PatchRebootEvidence {
-    param([string]$RunPath, $RunState, $Step, $Context)
+    param([string]$RunPath, $RunState, $VMRecord, $Step, $Context)
 
     $runId = [Guid](Get-PatchValue $RunState @('runId') '')
     $stepId = [Guid](Get-PatchValue $Step @('stepId') '')
     $mode = 'Reboot'
-    $vmName = [string](Get-PatchValue (Get-PatchValue $Context @('VM') $null) @('Name') 'vm')
-    $safeName = $vmName -replace '[^a-zA-Z0-9_.-]', '_'
-    $localPath = Join-Path (Get-PatchRunDirectory $RunPath) ('status-{0}-{1}.json' -f $safeName, $stepId.ToString('D'))
+    $localPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step).status
     try {
-        $statusParameters = @{
-            Context = $Context
-            RunId = $runId
-            StepId = $stepId
-            LocalPath = $localPath
-            IgnoreEsxiCertificate = [bool](Get-PatchOption -RunState $RunState -Names @('ignoreEsxiCertificatesForFileTransfers') -Default $false)
-        }
-        $statusCommand = Get-Command -Name 'Read-GuestStatus' -ErrorAction Stop
-        if ($statusCommand.Parameters.ContainsKey('ExpectedMode')) { $statusParameters.ExpectedMode = $mode }
-        $status = Read-GuestStatus @statusParameters
+        $status = Read-GuestStatus -Context $Context -RunId $runId -StepId $stepId -ExpectedMode $mode -LocalPath $localPath -IgnoreEsxiCertificate ([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false))
         if (Test-PatchFailedStatus -Status $status -RunId $runId.ToString('D') -StepId $stepId.ToString('D') -Mode $mode) {
             $errorMessage = [string](Get-PatchValue $status @('error', 'outcome') 'Guest agent failed.')
             if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = 'Guest agent failed.' }
@@ -1237,7 +1014,7 @@ function Invoke-PatchRebootStep {
     $stepIdText = [string](Get-PatchValue $step @('stepId') '')
     $hasRebootEvidence = Test-PatchRebootRequestStatus -Status (Get-PatchValue $step @('agentStatus') $null) -RunId $runIdText -StepId $stepIdText
     if (-not $hasRebootEvidence) {
-        [void](Read-PatchRebootEvidence -RunPath $RunPath -RunState $RunState -Step $step -Context $Context)
+        [void](Read-PatchRebootEvidence -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Step $step -Context $Context)
         $failedResult = Get-PatchRebootFailureResult -Step $step -RunId $runIdText -StepId $stepIdText
         if ($null -ne $failedResult) { return $failedResult }
         $hasRebootEvidence = Test-PatchRebootRequestStatus -Status (Get-PatchValue $step @('agentStatus') $null) -RunId $runIdText -StepId $stepIdText
@@ -1286,12 +1063,10 @@ function Invoke-PatchVmAction {
         }
         throw
     }
-    $actualId = Get-PatchVmId -VM $vm
-    if (-not [string]::IsNullOrWhiteSpace($savedId) -and -not [string]::IsNullOrWhiteSpace($actualId) -and $savedId -ne $actualId) {
-        throw ('Saved VM ID {0} resolved to {1}.' -f $savedId, $actualId)
-    }
-    if ([string]::IsNullOrWhiteSpace($savedId) -and -not [string]::IsNullOrWhiteSpace($actualId)) {
-        Set-PatchValue -InputObject $VMRecord -Name 'vmId' -Value $actualId
+    # Get-PatchVM verified the name, saved ID, FQDN, power state and VMware Tools.
+    # The first resolution binds the run entry to this vCenter object ID.
+    if ([string]::IsNullOrWhiteSpace($savedId)) {
+        Set-PatchValue -InputObject $VMRecord -Name 'vmId' -Value ([string]$vm.Id)
         Save-PatchDecision -RunPath $RunPath -RunState $RunState
     }
 
@@ -1308,15 +1083,11 @@ function Invoke-PatchVmAction {
         }
         throw
     }
-    Assert-PatchGuestIdentity -VMRecord $VMRecord -VM $vm -Context $context
 
-    $agentStatus = Get-PatchValue $VMRecord @('agentStatus') $null
     if ($Action -eq 'Install' -or $Action -eq 'Reboot') {
-        $membership = Get-PatchClusterMembership -Context $context -Status $agentStatus
-        if ([string]::IsNullOrWhiteSpace($membership)) { throw 'Cluster membership is unknown; the action is blocked.' }
-        if (-not [string]::Equals($membership, 'NotMember', [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw ('The action is blocked because cluster membership is {0}.' -f $membership)
-        }
+        # Last scan result; the agent checks the cluster state again in the guest before acting.
+        $membership = [string](Get-PatchValue (Get-PatchValue (Get-PatchValue $VMRecord @('agentStatus') $null) @('cluster') $null) @('membership') 'Unknown')
+        if ($membership -ne 'NotMember') { throw ('The action is blocked because cluster membership is {0}.' -f $membership) }
     }
 
     if ($Action -eq 'Reboot') {
@@ -1429,13 +1200,6 @@ function Invoke-PatchAction {
     $resultRows = @()
     try {
         $run = Read-PatchRun -RunPath $RunPath
-        if ($null -eq (Get-Command -Name 'Connect-PatchVCenter' -ErrorAction SilentlyContinue)) {
-            $adapterPath = Join-Path $PSScriptRoot 'GuestOps.ps1'
-            if (-not (Test-Path -LiteralPath $adapterPath -PathType Leaf)) {
-                throw ('The Guest Operations adapter was not found: {0}' -f $adapterPath)
-            }
-            . $adapterPath
-        }
         $runFile = Get-PatchRunJsonPath -RunPath $RunPath
         $runDirectory = Get-PatchRunDirectory -RunPath $RunPath
         $wasResumed = -not [string]::Equals([string](Get-PatchValue $run @('status') 'Created'), 'Created', [System.StringComparison]::OrdinalIgnoreCase)
