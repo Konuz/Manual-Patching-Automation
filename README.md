@@ -1,0 +1,88 @@
+# Windows Patch Wizard
+
+Windows Patch Wizard is a PowerShell 5.1 WinForms operator tool for scanning, selecting, installing, rebooting, and verifying Windows Server updates on vSphere virtual machines through vCenter Guest Operations. It keeps each run's decisions and evidence in a dedicated run folder and never writes credentials to that folder.
+
+## Requirements and launch
+
+Run the launcher from **64-bit Windows PowerShell 5.1** on the control workstation:
+
+```powershell
+Set-Location 'F:\Apki\Patching Automation v2'
+& .\Start-PatchWizard.ps1
+```
+
+The workstation needs:
+
+- VMware PowerCLI, including `VMware.VimAutomation.Core`, importable in Windows PowerShell 5.1.
+- The Windows `curl.exe` client for ESXi Guest Operations file transfers.
+- VMware Tools running in every target VM.
+- vCenter and guest credentials with the permissions required for inventory, Guest Operations, file transfer, process start, and the requested update actions.
+
+The guest must have Windows PowerShell 5.1 and the local Windows Update Agent available. The tool does not use WinRM and does not change the configured Windows Update source.
+
+## VM input
+
+Type VM entries into the Settings page, or use **Load text file** to load a text file. Use one VM per line in this format:
+
+```text
+VM name|expected FQDN
+```
+
+For example:
+
+```text
+APP-01|app-01.example.test
+```
+
+The name is resolved on the selected vCenter. A name must resolve to exactly one VM, and VMware Tools must report the expected FQDN before an action proceeds.
+
+## Operator workflow
+
+The wizard presents six steps. Actions that can change a guest require a separate explicit approval in the corresponding step.
+
+1. **Settings** — choose the vCenter, credentials, VM entries, run folder, and concurrency. Create a new run or choose **Resume run**.
+2. **Scan** — start the scan. The guest reports offered updates, pending reboot state, and cluster membership.
+3. **Select updates** — review the per-VM list, including optional updates and drivers, then approve the selected `UpdateID + RevisionNumber` values for installation.
+4. **Install** — approve installation. The agent searches again and installs only the still-offered selected revisions. The agent does not reboot the guest.
+5. **Reboot** — review the VMs with fresh reboot evidence and approve the reboot batch separately. The next batch waits for a newer boot time and running VMware Tools.
+6. **Verify** — start a fresh scan, then start another operator-selected round or finish the run with the remaining updates listed.
+
+The wizard does not automatically repeat a round, resend an uncertain install, or send a second reboot after an interrupted run. A terminal agent result must match its `runId`, `stepId`, mode, and parseable `finishedAt`.
+
+## Certificate choices
+
+Settings contains two independent, unchecked-by-default options:
+
+- **Ignore vCenter certificate** changes PowerCLI's certificate handling for the current vCenter session.
+- **Ignore ESXi certificates for file transfers** adds the insecure curl option only to ESXi transfer calls.
+
+Enabling one option does not enable the other. Ignoring a certificate means the server identity is not verified. The choices are saved in the run state and summary so a resumed run keeps the same settings.
+
+## Runs, logs, resume, and credentials
+
+Each run is stored under `runs/<runId>/` (or the output folder selected in Settings). A new run starts with `run.json`. During actions, `run.log` is appended, `errors.log` is created when an error is recorded, per-VM status and agent log files appear when an agent step runs, and `summary.md` and `summary.csv` are created or refreshed whenever the controller writes a summary. A skipped VM or a newly created run therefore may not have every file. Use **Open logs** in the wizard or open the run folder directly.
+
+Use **Resume run** to continue an interrupted run. Credentials are requested again and kept in memory only; passwords, secure strings, and credential objects are excluded from `run.json`, logs, and summaries.
+
+## Offline verification
+
+Run the focused checks from 64-bit Windows PowerShell 5.1:
+
+```powershell
+& .\tests\Invoke-CoreChecks.ps1
+```
+
+These are focused offline regressions, not exhaustive live, GUI, or WUA coverage. They use local doubles only and do not connect to vCenter, query WUA, install updates, or reboot a VM. They cover exact VM scoping and duplicate rejection, cluster blocking, exact `UpdateID + RevisionNumber` matching, terminal status evidence, independent certificate flags and channel forwarding, credential exclusion and failure summaries, and the no-duplicate-start resume guard.
+
+## Safe nonproduction pilot
+
+Before production use:
+
+1. Confirm the PowerShell 5.1 bitness, PowerCLI import, curl availability, vCenter access, guest permissions, and running VMware Tools.
+2. Select one disposable, nonproduction VM and enter its exact name and expected FQDN.
+3. Run Scan, review the offered updates and cluster state, select a small approved set, then approve Install.
+4. Review per-update results and approve Reboot only when the wizard reports fresh pending reboot evidence.
+5. Complete Verify and inspect the files written for the run, including `run.log`, any `errors.log`, per-step `status-*.json` and `agent-*.log`, `summary.md`, and `summary.csv`.
+6. Repeat the pilot after closing the GUI during Install and after reboot dispatch; use Resume run and confirm that the existing step is observed instead of started again.
+
+Do not use a production VM for the first pilot. Cluster members and VMs with an unknown cluster state remain blocked for install and reboot.

@@ -1,0 +1,493 @@
+# Windows PowerShell 5.1 Guest Operations adapter.
+
+function Connect-PatchVCenter {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ServerName,
+
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]$Credential,
+
+        [bool]$IgnoreVCenterCertificate = $false
+    )
+
+    Import-Module VMware.VimAutomation.Core -ErrorAction Stop
+
+    if ($IgnoreVCenterCertificate) {
+        Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -Confirm:$false -ErrorAction Stop | Out-Null
+    }
+    else {
+        Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Fail -Confirm:$false -ErrorAction Stop | Out-Null
+    }
+
+    return (Connect-VIServer -Server $ServerName -Credential $Credential -ErrorAction Stop)
+}
+
+function Get-PatchVM {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
+        [object]$Server,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$ExpectedFqdn,
+
+        [string]$SavedId
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($SavedId)) {
+        $matches = @(Get-VM -Id $SavedId -Server $Server -ErrorAction Stop)
+    }
+    else {
+        # Get-VM treats -Name as a wildcard pattern. Escape it before the lookup and
+        # keep the literal comparison below as the final identity check.
+        $escapedName = [System.Management.Automation.WildcardPattern]::Escape($Name)
+        $matches = @(Get-VM -Name $escapedName -Server $Server -ErrorAction Stop | Where-Object {
+                [string]::Equals([string]$_.Name, $Name, [System.StringComparison]::OrdinalIgnoreCase)
+            })
+    }
+
+    if ($matches.Count -ne 1) {
+        throw ('Expected exactly one VM named {0}; found {1}.' -f $Name, $matches.Count)
+    }
+
+    $vm = $matches[0]
+    if (-not [string]::Equals([string]$vm.Name, $Name, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ('Saved VM identity does not match the requested name {0}.' -f $Name)
+    }
+
+    $actualId = $null
+    $idProperty = $vm.PSObject.Properties['Id']
+    if ($null -ne $idProperty) {
+        $actualId = [string]$idProperty.Value
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SavedId) -and -not [string]::IsNullOrWhiteSpace($actualId) -and
+        -not [string]::Equals($actualId, $SavedId, [System.StringComparison]::Ordinal)) {
+        throw ('Saved VM id {0} resolved to a different VM id {1}.' -f $SavedId, $actualId)
+    }
+
+    $guest = $vm.ExtensionData.Guest
+    $guestHostName = [string]$guest.HostName
+    $normalizedExpected = $ExpectedFqdn.Trim().TrimEnd('.')
+    $normalizedActual = $guestHostName.Trim().TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($normalizedActual) -or
+        -not [string]::Equals($normalizedActual, $normalizedExpected, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ('VM {0} does not have the expected guest FQDN {1}. VMware Tools reported: {2}' -f $Name, $ExpectedFqdn, $guestHostName)
+    }
+
+    if ([string]$vm.PowerState -ne 'PoweredOn') {
+        throw ('VM {0} is not powered on. Current state: {1}' -f $Name, $vm.PowerState)
+    }
+    if ([string]$guest.ToolsRunningStatus -ne 'guestToolsRunning') {
+        throw ('VMware Tools are not running on {0}. ToolsRunningStatus: {1}' -f $Name, $guest.ToolsRunningStatus)
+    }
+
+    # Keep the exact VIServer object with the VM so later Invoke-VMScript calls
+    # cannot fall back to a global/default PowerCLI session.
+    $vm | Add-Member -MemberType NoteProperty -Name PatchServer -Value $Server -Force | Out-Null
+    return $vm
+}
+
+function Get-GuestContext {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
+        [object]$VM,
+
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PSCredential]$GuestCredential
+    )
+
+    $vmView = $VM.ExtensionData
+    if ($null -eq $vmView) {
+        throw 'The VM does not expose an ExtensionData view.'
+    }
+    $client = $vmView.Client
+    if ($null -eq $client -or $null -eq $client.ServiceContent) {
+        throw 'The VM view does not expose its vCenter client.'
+    }
+
+    $server = $null
+    foreach ($propertyName in @('PatchServer', 'VIServer', 'Server')) {
+        $property = $VM.PSObject.Properties[$propertyName]
+        if ($null -ne $property -and $null -ne $property.Value) {
+            $server = $property.Value
+            break
+        }
+    }
+    if ($null -eq $server) {
+        $serviceUrl = [string]$client.ServiceUrl
+        if (-not [string]::IsNullOrWhiteSpace($serviceUrl)) {
+            $server = ([uri]$serviceUrl).Host
+        }
+    }
+    if ($null -eq $server) {
+        throw 'The VM has no vCenter server scope for Guest Operations.'
+    }
+
+    $guestOperationsReference = $client.ServiceContent.GuestOperationsManager
+    if ($null -eq $guestOperationsReference) {
+        throw 'The vCenter client does not expose Guest Operations.'
+    }
+    $guestOperations = $client.GetView($guestOperationsReference, $null)
+    $processManager = $client.GetView($guestOperations.ProcessManager, $null)
+    $fileManager = $client.GetView($guestOperations.FileManager, $null)
+    $authManager = $client.GetView($guestOperations.AuthManager, $null)
+    if ($null -eq $processManager -or $null -eq $fileManager -or $null -eq $authManager) {
+        throw 'The vCenter client could not resolve all Guest Operations managers.'
+    }
+
+    $authentication = New-Object VMware.Vim.NamePasswordAuthentication
+    $authentication.Username = $GuestCredential.UserName
+    $authentication.Password = $GuestCredential.GetNetworkCredential().Password
+    $authentication.InteractiveSession = $false
+    # ValidateCredentialsInGuest returns no value; a fault is the failure signal.
+    $authManager.ValidateCredentialsInGuest($vmView.MoRef, $authentication)
+    $guestAuthentication = $authentication
+
+    $environmentValues = @($processManager.ReadEnvironmentVariableInGuest($vmView.MoRef, $guestAuthentication, @('ProgramData')))
+    $programData = $null
+    foreach ($environmentValue in $environmentValues) {
+        $environmentText = [string]$environmentValue
+        $separator = $environmentText.IndexOf('=')
+        if ($separator -gt 0) {
+            $environmentName = $environmentText.Substring(0, $separator)
+            if ([string]::Equals($environmentName, 'ProgramData', [System.StringComparison]::OrdinalIgnoreCase)) {
+                $programData = $environmentText.Substring($separator + 1)
+                break
+            }
+        }
+        elseif ($environmentValues.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace($environmentText)) {
+            $programData = $environmentText
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($programData)) {
+        throw 'The guest ProgramData environment variable could not be read.'
+    }
+
+    $hostReference = $vmView.Runtime.Host
+    if ($null -eq $hostReference) {
+        throw 'The VM view does not expose its ESXi host.'
+    }
+    $hostView = $client.GetView($hostReference, $null)
+    $esxiHostName = [string]$hostView.Name
+    if ([string]::IsNullOrWhiteSpace($esxiHostName)) {
+        throw 'The VM ESXi host name is empty.'
+    }
+
+    return [pscustomobject]@{
+        VM = $VM
+        VMView = $vmView
+        Client = $client
+        Server = $server
+        GuestCredential = $GuestCredential
+        GuestAuth = $guestAuthentication
+        ProcessManager = $processManager
+        FileManager = $fileManager
+        AuthManager = $authManager
+        ProgramData = $programData
+        EsxiHostName = $esxiHostName
+    }
+}
+
+function Resolve-PatchTransferUrl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$EsxiHostName
+    )
+
+    if ($Url.StartsWith('https://*/', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $Url.Substring(0, 8) + $EsxiHostName + $Url.Substring(9)
+    }
+    return $Url
+}
+
+function Invoke-PatchCurl {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+
+    $curl = Get-Command -Name 'curl.exe' -CommandType Application -ErrorAction Stop
+    $null = & $curl.Source @Arguments 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        # Do not include the transfer URL: vSphere embeds a one-time token in it.
+        throw ('curl.exe failed with exit code {0}.' -f $LASTEXITCODE)
+    }
+}
+
+function Test-GuestTransferEndpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateNotNull()]$Context,
+        [bool]$IgnoreEsxiCertificate = $false
+    )
+
+    $url = 'https://{0}/' -f $Context.EsxiHostName
+    $curlArguments = @('--disable')
+    if ($IgnoreEsxiCertificate) {
+        $curlArguments += '--insecure'
+    }
+    $curlArguments += @(
+        '--silent',
+        '--show-error',
+        '--head',
+        '--output',
+        'NUL',
+        '--max-time',
+        '30',
+        $url
+    )
+    Invoke-PatchCurl -Arguments $curlArguments
+    return [pscustomobject]@{ EsxiHostName = $Context.EsxiHostName; Reachable = $true }
+}
+
+function Send-GuestFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateNotNull()]$Context,
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$LocalPath,
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$GuestPath,
+        [bool]$IgnoreEsxiCertificate = $false
+    )
+
+    $localFile = Get-Item -LiteralPath $LocalPath -ErrorAction Stop
+    if ($localFile.PSIsContainer) {
+        throw ('The local transfer path is a directory: {0}' -f $LocalPath)
+    }
+
+    $guestDirectory = Split-Path -Path $GuestPath -Parent
+    if ([string]::IsNullOrWhiteSpace($guestDirectory)) {
+        throw ('The guest transfer path has no parent directory: {0}' -f $GuestPath)
+    }
+    try {
+        $Context.FileManager.MakeDirectoryInGuest($Context.VMView.MoRef, $Context.GuestAuth, $guestDirectory, $true)
+    }
+    catch {
+        $vimException = $null
+        $currentException = $_.Exception
+        while ($null -ne $currentException) {
+            if ($currentException -is [VMware.Vim.VimException]) {
+                $vimException = $currentException
+                break
+            }
+            $currentException = $currentException.InnerException
+        }
+        if ($null -eq $vimException -or $null -eq $vimException.MethodFault -or
+            -not ($vimException.MethodFault -is [VMware.Vim.FileAlreadyExists])) {
+            throw
+        }
+    }
+
+    $attributes = New-Object VMware.Vim.GuestFileAttributes
+    $transferUrl = $Context.FileManager.InitiateFileTransferToGuest(
+        $Context.VMView.MoRef,
+        $Context.GuestAuth,
+        $GuestPath,
+        $attributes,
+        [int64]$localFile.Length,
+        $true
+    )
+    $resolvedUrl = Resolve-PatchTransferUrl -Url ([string]$transferUrl) -EsxiHostName $Context.EsxiHostName
+
+    $curlArguments = @('--disable')
+    if ($IgnoreEsxiCertificate) {
+        $curlArguments += '--insecure'
+    }
+    $curlArguments += @(
+        '--silent',
+        '--show-error',
+        '--fail',
+        '--max-time',
+        '30',
+        '--request',
+        'PUT',
+        '--upload-file',
+        $LocalPath,
+        $resolvedUrl
+    )
+    Invoke-PatchCurl -Arguments $curlArguments
+
+    return [pscustomobject]@{
+        LocalPath = $LocalPath
+        GuestPath = $GuestPath
+        Bytes = [int64]$localFile.Length
+    }
+}
+
+function Receive-GuestFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateNotNull()]$Context,
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$GuestPath,
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$LocalPath,
+        [bool]$IgnoreEsxiCertificate = $false
+    )
+
+    $localDirectory = Split-Path -Path $LocalPath -Parent
+    if (-not [string]::IsNullOrWhiteSpace($localDirectory) -and
+        -not (Test-Path -LiteralPath $localDirectory -PathType Container)) {
+        New-Item -ItemType Directory -Path $localDirectory -Force | Out-Null
+    }
+
+    $transferInfo = $Context.FileManager.InitiateFileTransferFromGuest(
+        $Context.VMView.MoRef,
+        $Context.GuestAuth,
+        $GuestPath
+    )
+    $resolvedUrl = Resolve-PatchTransferUrl -Url ([string]$transferInfo.Url) -EsxiHostName $Context.EsxiHostName
+
+    $curlArguments = @('--disable')
+    if ($IgnoreEsxiCertificate) {
+        $curlArguments += '--insecure'
+    }
+    $curlArguments += @(
+        '--silent',
+        '--show-error',
+        '--fail',
+        '--max-time',
+        '30',
+        '--output',
+        $LocalPath,
+        $resolvedUrl
+    )
+    Invoke-PatchCurl -Arguments $curlArguments
+
+    return [pscustomobject]@{
+        LocalPath = $LocalPath
+        GuestPath = $GuestPath
+    }
+}
+
+function Start-GuestAgent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateNotNull()]$Context,
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$GuestAgentPath,
+        [Parameter(Mandatory = $true)][ValidateSet('Scan', 'Install', 'Reboot')][string]$Mode,
+        [Parameter(Mandatory = $true)][Guid]$RunId,
+        [Parameter(Mandatory = $true)][Guid]$StepId,
+        [string]$SelectionPath
+    )
+
+    $escapedAgentPath = $GuestAgentPath.Replace('"', '\"')
+    $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode {1} -RunId "{2}" -StepId "{3}"' -f `
+        $escapedAgentPath, $Mode, $RunId.ToString('D'), $StepId.ToString('D')
+    if (-not [string]::IsNullOrWhiteSpace($SelectionPath)) {
+        $escapedSelectionPath = $SelectionPath.Replace('"', '\"')
+        $arguments = '{0} -SelectionPath "{1}"' -f $arguments, $escapedSelectionPath
+    }
+
+    $programSpec = New-Object VMware.Vim.GuestProgramSpec
+    $programSpec.ProgramPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+    $programSpec.Arguments = $arguments
+    $programSpec.WorkingDirectory = 'C:\Windows\System32'
+    return [int64]$Context.ProcessManager.StartProgramInGuest($Context.VMView.MoRef, $Context.GuestAuth, $programSpec)
+}
+
+function Get-GuestProcess {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateNotNull()]$Context,
+        [Parameter(Mandatory = $true)][Alias('Pid')][long]$ProcessId
+    )
+
+    return @($Context.ProcessManager.ListProcessesInGuest($Context.VMView.MoRef, $Context.GuestAuth, [long[]]@($ProcessId)))
+}
+
+function Read-GuestStatus {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateNotNull()]$Context,
+        [Parameter(Mandatory = $true)][Guid]$RunId,
+        [Parameter(Mandatory = $true)][Guid]$StepId,
+        [Parameter(Mandatory = $true)][ValidateSet('Scan', 'Install', 'Reboot')][string]$ExpectedMode,
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$LocalPath,
+        [bool]$IgnoreEsxiCertificate = $false
+    )
+
+    $guestStepDirectory = Join-Path (Join-Path (Join-Path $Context.ProgramData 'WindowsPatchWizard') $RunId.ToString('D')) $StepId.ToString('D')
+    $guestStatusPath = Join-Path $guestStepDirectory 'status.json'
+    try {
+        Receive-GuestFile -Context $Context -GuestPath $guestStatusPath -LocalPath $LocalPath -IgnoreEsxiCertificate:$IgnoreEsxiCertificate | Out-Null
+    }
+    catch {
+        $isMissing = $false
+        $currentException = $_.Exception
+        while ($null -ne $currentException) {
+            if ($currentException -is [VMware.Vim.FileNotFound]) {
+                $isMissing = $true
+                break
+            }
+            $currentException = $currentException.InnerException
+        }
+        if ($isMissing -or $_.Exception.Message -match '(?i)not found|does not exist|no such file') {
+            return $null
+        }
+        throw
+    }
+
+    if (-not (Test-Path -LiteralPath $LocalPath -PathType Leaf)) {
+        return $null
+    }
+    $status = Get-Content -LiteralPath $LocalPath -Raw -ErrorAction Stop | ConvertFrom-Json
+    if (-not [string]::Equals([string]$status.runId, $RunId.ToString('D'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ('Guest status runId does not match the requested run {0}.' -f $RunId.ToString('D'))
+    }
+    if (-not [string]::Equals([string]$status.stepId, $StepId.ToString('D'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ('Guest status stepId does not match the requested step {0}.' -f $StepId.ToString('D'))
+    }
+
+    if (-not [string]::Equals([string]$status.mode, $ExpectedMode, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ('Guest status mode {0} does not match the expected mode {1}.' -f $status.mode, $ExpectedMode)
+    }
+
+    $statusState = [string]$status.status
+    $terminalStates = if ($ExpectedMode -eq 'Reboot') { @('RebootRequested', 'Failed') } else { @('Completed', 'Failed') }
+    if ($statusState -eq 'Started') {
+        return $status
+    }
+    if ($terminalStates -notcontains $statusState) {
+        throw ('Guest status state {0} is invalid for mode {1}.' -f $statusState, $ExpectedMode)
+    }
+
+    $finishedAtText = [string]$status.finishedAt
+    [datetime]$finishedAt = [datetime]::MinValue
+    if ([string]::IsNullOrWhiteSpace($finishedAtText) -or
+        -not [datetime]::TryParse($finishedAtText, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$finishedAt)) {
+        throw ('Guest status {0} for mode {1} has no parseable finishedAt.' -f $statusState, $ExpectedMode)
+    }
+    return $status
+}
+
+function Read-GuestBootTime {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateNotNull()]$Context
+    )
+
+    $toolsRunningStatus = [string]$Context.VM.ExtensionData.Guest.ToolsRunningStatus
+    if ($toolsRunningStatus -ne 'guestToolsRunning') {
+        throw ('VMware Tools are not running on {0}.' -f $Context.VM.Name)
+    }
+    if ($null -eq $Context.Server -or $null -eq $Context.GuestCredential) {
+        throw 'The Guest Operations context has no vCenter server or guest credential.'
+    }
+
+    $scriptText = '$os = Get-WmiObject -Class Win32_OperatingSystem | Select-Object -First 1; if ($null -eq $os) { throw "Win32_OperatingSystem was not found." }; ([System.Management.ManagementDateTimeConverter]::ToDateTime([string]$os.LastBootUpTime)).ToUniversalTime().ToString("o")'
+    $scriptResult = Invoke-VMScript -VM $Context.VM -GuestCredential $Context.GuestCredential -Server $Context.Server -ScriptType PowerShell -ScriptText $scriptText -ErrorAction Stop
+    $outputLines = @(([string]$scriptResult.ScriptOutput) -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($outputLines.Count -eq 0) {
+        throw 'The guest boot time query returned no value.'
+    }
+    $bootTime = [datetime]::Parse($outputLines[$outputLines.Count - 1].Trim(), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+    return $bootTime.ToUniversalTime().ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+}
