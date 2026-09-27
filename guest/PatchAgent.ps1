@@ -147,76 +147,19 @@ public static extern int GetNodeClusterState(string lpszNodeName, out uint pdwCl
     }
 }
 
-function Get-LocalFqdn {
-    $hostName = [System.Net.Dns]::GetHostName()
-    try {
-        $entry = [System.Net.Dns]::GetHostEntry($hostName)
-        if ($entry.HostName -like '*.*') {
-            return [ordered]@{ value = $entry.HostName; error = $null }
-        }
-    }
-    catch {
-    }
-
-    try {
-        $computer = Get-WmiObject -Class Win32_ComputerSystem
-        $dnsHostName = [string]$computer.DNSHostName
-        $domain = [string]$computer.Domain
-        if ($dnsHostName -and $domain -and $domain -like '*.*') {
-            return [ordered]@{ value = '{0}.{1}' -f $dnsHostName, $domain; error = $null }
-        }
-    }
-    catch {
-    }
-
-    return [ordered]@{ value = $null; error = 'A fully qualified DNS name could not be resolved.' }
-}
-
-function Get-LastBootUpTime {
-    try {
-        $operatingSystem = Get-WmiObject -Class Win32_OperatingSystem
-        $time = [System.Management.ManagementDateTimeConverter]::ToDateTime([string]$operatingSystem.LastBootUpTime)
-        return [ordered]@{ value = $time.ToUniversalTime().ToString('o'); error = $null }
-    }
-    catch {
-        return [ordered]@{ value = $null; error = 'Last boot time could not be read.' }
-    }
-}
-
 function Get-PendingReboot {
-    $cbsPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
-    $wuaPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
-    $renamePending = $false
-
-    try {
-        $sessionManager = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction Stop
-        $renamePending = @($sessionManager.PendingFileRenameOperations | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0
-    }
-    catch {
-        $renamePending = $false
-    }
-
-    $componentBasedServicing = Test-Path -LiteralPath $cbsPath
-    $windowsUpdate = Test-Path -LiteralPath $wuaPath
+    # Windows servicing and Windows Update mark a required restart with these keys.
+    $componentBasedServicing = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+    $windowsUpdate = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
     return [ordered]@{
         isPending = ($componentBasedServicing -or $windowsUpdate)
         componentBasedServicing = $componentBasedServicing
         windowsUpdate = $windowsUpdate
-        pendingFileRenameOperations = $renamePending
-        pendingFileRenameOperationsAdvisory = $true
     }
 }
 
 function Get-SystemSnapshot {
-    $fqdn = Get-LocalFqdn
-    $lastBoot = Get-LastBootUpTime
-    return [ordered]@{
-        fqdn = $fqdn.value
-        fqdnError = $fqdn.error
-        lastBootUpTime = $lastBoot.value
-        lastBootUpTimeError = $lastBoot.error
-        pendingReboot = Get-PendingReboot
-    }
+    return [ordered]@{ pendingReboot = Get-PendingReboot }
 }
 
 function Convert-UpdateType {
@@ -455,12 +398,6 @@ function Invoke-Install {
 
     $installer = $search.session.CreateUpdateInstaller()
     $installer.Updates = $selectedUpdates
-    $script:Status.clusterBeforeInstall = Get-ClusterState
-    if ($script:Status.clusterBeforeInstall.membership -ne 'NotMember') {
-        $script:Status.outcome = 'BlockedByCluster'
-        Save-Status
-        throw 'Installation is blocked because cluster membership changed to Member or Unknown.'
-    }
     $installResult = $installer.Install()
     $script:Status.installResult = New-WuaResult -Result $installResult
     for ($i = 0; $i -lt $selectedIndexes.Count; $i++) {
@@ -492,32 +429,19 @@ function Invoke-Reboot {
         throw 'Reboot is blocked because cluster membership is Member or Unknown.'
     }
 
-    $script:Status.system = Get-SystemSnapshot
-    if ([string]::IsNullOrWhiteSpace([string]$script:Status.system.lastBootUpTime)) {
-        $script:Status.outcome = 'MissingBaselineBootTime'
-        throw 'Reboot is blocked because the baseline boot time could not be read.'
-    }
-
-    $script:Status.rebootIntent = [ordered]@{
-        state = 'Requested'
-        requestedAt = (Get-Date).ToUniversalTime().ToString('o')
-        baselineBootTime = $script:Status.system.lastBootUpTime
-        command = 'shutdown.exe /r /t 0'
-    }
+    # Final status first: after the restart the agent cannot write it. The controller confirms
+    # the reboot by a newer boot time; the agent never restarts on its own in other modes.
     $script:Status.status = 'RebootRequested'
     $script:Status.outcome = 'RebootRequested'
     $script:Status.finishedAt = (Get-Date).ToUniversalTime().ToString('o')
     Save-Status
-    Write-AgentLog -Message 'Reboot intent and baseline boot time were recorded.'
+    Write-AgentLog -Message 'Reboot requested with shutdown.exe /r /t 0.'
 
     $process = Start-Process -FilePath 'shutdown.exe' -ArgumentList @('/r', '/t', '0') -Wait -PassThru -WindowStyle Hidden
     if ($process.ExitCode -ne 0) {
         $script:Status.outcome = 'RebootCommandFailed'
         throw 'shutdown.exe returned a nonzero exit code.'
     }
-
-    Write-AgentLog -Message 'Reboot command issued; awaiting controller confirmation of a newer boot time.'
-    # RebootRequested is terminal dispatch evidence only; the controller confirms the reboot.
 }
 
 try {
@@ -540,9 +464,6 @@ try {
 catch {
     $message = $_.Exception.Message
     $script:Status.error = $message
-    if ($script:Status.status -eq 'RebootRequested') {
-        $script:Status.outcome = 'RebootCommandFailed'
-    }
     if ([string]::IsNullOrWhiteSpace([string]$script:Status.outcome)) {
         $script:Status.outcome = 'Failed'
     }
@@ -550,9 +471,4 @@ catch {
     Set-TerminalStatus -State 'Failed' -Outcome $script:Status.outcome
     exit 1
 }
-
-if ($Mode -eq 'Reboot') {
-    exit 0
-}
-
 exit 0
