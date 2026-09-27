@@ -826,7 +826,7 @@ function Start-WizardNewRound {
         $unresolvedMutatingStep = Get-WizardUnresolvedMutatingStep
         if ($null -ne $unresolvedMutatingStep) {
             $action = [string](Get-WizardProperty $unresolvedMutatingStep @('action') 'mutating')
-            Set-WizardStatus -Message ('Resolve the started {0} step before starting a new round.' -f $action)
+            Set-WizardStatus -Message ('The started {0} step has no final result. Check the guest, then use Mark steps reviewed.' -f $action)
             return
         }
         $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, 'Start a new round? This clears the current offered update lists and selections. Run Scan again to obtain a fresh selection.', 'Start another round', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
@@ -852,6 +852,35 @@ function Start-WizardNewRound {
         Refresh-WizardRebootGrid
         $script:Wizard.Tabs.SelectedIndex = 1
         Set-WizardStatus -Message ('Round {0} created. Run Scan to build a fresh update selection.' -f $round)
+    }
+    catch {
+        Show-WizardError -Message $_.Exception.Message
+    }
+}
+
+function Set-WizardStepsReviewed {
+    try {
+        if ($null -eq $script:Wizard.RunState) { throw 'Create or resume a run first.' }
+        $blocked = @()
+        foreach ($vm in @(Get-WizardArray (Get-WizardProperty $script:Wizard.RunState @('vms') @()))) {
+            $step = Get-PatchMutatingStepBlocker -RunState $script:Wizard.RunState -VMRecord $vm -CurrentStep $null
+            if ($null -ne $step) { $blocked += [pscustomobject]@{ VmName = [string](Get-WizardProperty $vm @('vmName') ''); Step = $step } }
+        }
+        if ($blocked.Count -eq 0) {
+            Set-WizardStatus -Message 'There are no unresolved install or reboot steps.'
+            return
+        }
+        $lines = @($blocked | ForEach-Object { '{0}: {1} (round {2})' -f $_.VmName, $_.Step.action, $_.Step.round })
+        $prompt = 'These steps have no final agent result:{0}{0}{1}{0}{0}Check each guest manually (agent log, Windows Update history, last boot time). Mark them as reviewed so the VMs can continue?' -f [Environment]::NewLine, ($lines -join [Environment]::NewLine)
+        $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, $prompt, 'Mark steps as reviewed', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        foreach ($item in $blocked) {
+            Set-WizardProperty -InputObject $item.Step -Name 'status' -Value 'Reviewed'
+            Write-PatchEvent -RunPath $script:Wizard.RunPath -Message ('Operator marked the unresolved {0} step as reviewed.' -f $item.Step.action) -VMName $item.VmName -Step $item.Step.action -Level 'WARN'
+        }
+        Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
+        Set-WizardStatus -Message ('Marked {0} step(s) as reviewed.' -f $blocked.Count)
+        Update-WizardStepState
     }
     catch {
         Show-WizardError -Message $_.Exception.Message
@@ -1205,9 +1234,15 @@ function Initialize-WizardUi {
     $finishButton.Location = New-Object System.Drawing.Point(180, 45)
     $finishButton.Size = New-Object System.Drawing.Size(115, 30)
     $finishButton.Add_Click({ Finish-WizardRun })
-    $verifyHint = New-WizardLabel -Text 'Verify is a fresh scan. Choose Start another round only when the operator wants a new scan and update selection; there is no automatic loop.' -X 315 -Y 48 -Width 780 -Height 35
+    $reviewButton = New-Object System.Windows.Forms.Button
+    $reviewButton.Text = 'Mark steps reviewed'
+    $reviewButton.Location = New-Object System.Drawing.Point(308, 45)
+    $reviewButton.Size = New-Object System.Drawing.Size(150, 30)
+    $reviewButton.Add_Click({ Set-WizardStepsReviewed })
+    $verifyHint = New-WizardLabel -Text 'Verify is a fresh scan. Start another round only for a new scan and selection; there is no automatic loop. Mark steps reviewed after checking a guest whose install or reboot has no final result.' -X 470 -Y 42 -Width 640 -Height 40
     $verifyHint.ForeColor = [System.Drawing.Color]::DimGray
     $verifyTab.Controls.Add($verifyHint)
+    $verifyTab.Controls.Add($reviewButton)
     $verifyTab.Controls.Add($finishButton)
     $verifyTab.Controls.Add($roundButton)
     $verifyTab.Controls.Add($verifyButton)

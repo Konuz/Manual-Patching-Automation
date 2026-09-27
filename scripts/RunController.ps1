@@ -596,8 +596,8 @@ function Get-PatchStep {
     for ($index = $steps.Count - 1; $index -ge 0; $index--) {
         $step = $steps[$index]
         if ([string]::Equals([string](Get-PatchValue $step @('action') ''), $Action, [System.StringComparison]::OrdinalIgnoreCase) -and [int](Get-PatchValue $step @('round') 0) -eq $Round) {
-            # A confirmed reboot is finished; another pending reboot in the same round needs a new step.
-            if ($Action -eq 'Reboot' -and [string](Get-PatchValue $step @('status') '') -eq 'Confirmed') { break }
+            # A confirmed or reviewed reboot is finished; another pending reboot in the same round needs a new step.
+            if ($Action -eq 'Reboot' -and [string](Get-PatchValue $step @('status') '') -in @('Confirmed', 'Reviewed')) { break }
             return $step
         }
     }
@@ -668,6 +668,8 @@ function Test-PatchMutatingStepReconciled {
     $action = [string](Get-PatchValue $Step @('action') '')
     $status = [string](Get-PatchValue $Step @('status') '')
     $agentStatus = Get-PatchValue $Step @('agentStatus') $null
+    # The operator checked the guest manually and marked the step as reviewed.
+    if ($status -eq 'Reviewed') { return $true }
 
     if ([string]::Equals($action, 'Reboot', [System.StringComparison]::OrdinalIgnoreCase)) {
         if (-not [string]::Equals($status, 'Confirmed', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
@@ -1035,7 +1037,7 @@ function Invoke-PatchAgentStep {
     $readOnlyAction = $Action -eq 'Scan' -or $Action -eq 'Verify'
     $agentMode = [string](Get-PatchValue $step @('agentMode') $defaultAgentMode)
     $terminalStatus = [string](Get-PatchValue $step @('status') '')
-    $terminal = $terminalStatus -eq 'Completed' -or $terminalStatus -eq 'CompletedWithErrors' -or ($readOnlyAction -and $terminalStatus -eq 'Failed')
+    $terminal = $terminalStatus -eq 'Completed' -or $terminalStatus -eq 'CompletedWithErrors' -or $terminalStatus -eq 'Reviewed' -or ($readOnlyAction -and $terminalStatus -eq 'Failed')
     $stepReconciled = Test-PatchMutatingStepReconciled -Step $step -RunId ([string](Get-PatchValue $RunState @('runId') ''))
     if ($terminal -and $stepReconciled) {
         $hasTerminalAgentEvidence = Test-PatchStatusIdentity -Status (Get-PatchValue $step @('agentStatus') $null) -RunId ([string](Get-PatchValue $RunState @('runId') '')) -StepId ([string](Get-PatchValue $step @('stepId') '')) -Mode $agentMode
