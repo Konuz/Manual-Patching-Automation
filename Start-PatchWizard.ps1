@@ -27,6 +27,11 @@ $script:Wizard = @{
     UpdatingGrid = $false
     UpdateRows = @()
     Controls = @{}
+    BaseClientSize = $null
+    BaseFont = $null
+    BaseLayout = @{}
+    Stretch = @{}
+    LastWindowState = $null
 }
 
 $savedPreference = $ErrorActionPreference
@@ -822,6 +827,61 @@ function New-WizardTextBox {
     return $textBox
 }
 
+function Set-WizardGridScaling {
+    # Columns share the grid width in fixed proportions; row and header heights follow the font.
+    param([System.Windows.Forms.DataGridView]$Grid)
+    $Grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+    $Grid.AutoSizeRowsMode = [System.Windows.Forms.DataGridViewAutoSizeRowsMode]::DisplayedCells
+    $Grid.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::AutoSize
+}
+
+function Save-WizardLayout {
+    # Remembers every control's bounds at the first shown size: the 100 % reference for zooming.
+    param([System.Windows.Forms.Control]$Parent)
+    foreach ($control in $Parent.Controls) {
+        $script:Wizard.BaseLayout[$control] = @{ Bounds = $control.Bounds; ParentSize = $Parent.ClientSize }
+        if ($control -is [System.Windows.Forms.Panel] -or $control -is [System.Windows.Forms.TabControl]) { Save-WizardLayout -Parent $control }
+    }
+}
+
+function Set-WizardScaledBounds {
+    # Reference bounds x factor; fields marked in Wizard.Stretch also take up the space left over
+    # when the window is wider (or taller) than the zoom factor needs.
+    param([System.Windows.Forms.Control]$Parent, [double]$Factor)
+    if ($Parent -is [System.Windows.Forms.ScrollableControl] -and $Parent.AutoScroll) { $Parent.AutoScrollPosition = New-Object System.Drawing.Point(0, 0) }
+    foreach ($control in $Parent.Controls) {
+        $base = $script:Wizard.BaseLayout[$control]
+        if ($null -eq $base -or $control -is [System.Windows.Forms.TabPage] -or $control.Dock -eq [System.Windows.Forms.DockStyle]::Fill) { continue }
+        $x = $base.Bounds.X * $Factor; $y = $base.Bounds.Y * $Factor
+        $width = $base.Bounds.Width * $Factor; $height = $base.Bounds.Height * $Factor
+        $extraWidth = [Math]::Max(0, $Parent.ClientSize.Width - $base.ParentSize.Width * $Factor)
+        $extraHeight = [Math]::Max(0, $Parent.ClientSize.Height - $base.ParentSize.Height * $Factor)
+        switch ([string]$script:Wizard.Stretch[$control]) {
+            'Width' { $width += $extraWidth }
+            'Right' { $x += $extraWidth }
+            'Both' { $width += $extraWidth; $height += $extraHeight }
+        }
+        $control.SetBounds([int]$x, [int]$y, [int]$width, [int]$height)
+    }
+    # Let docked siblings take their new size before their children are placed.
+    $Parent.PerformLayout()
+    foreach ($control in $Parent.Controls) {
+        if ($control -is [System.Windows.Forms.Panel] -or $control -is [System.Windows.Forms.TabControl]) { Set-WizardScaledBounds -Parent $control -Factor $Factor }
+    }
+}
+
+function Update-WizardScale {
+    # Zooms the window content (positions, sizes, fonts, tabs) with the window by the smaller of the
+    # width and height ratios to the first shown size. Always computed from that reference, so
+    # repeated resizing does not drift.
+    $form = $script:Wizard.Form
+    if ($script:Wizard.BaseLayout.Count -eq 0 -or $form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) { return }
+    $factor = [Math]::Min($form.ClientSize.Width / $script:Wizard.BaseClientSize.Width, $form.ClientSize.Height / $script:Wizard.BaseClientSize.Height)
+    $form.Font = New-Object System.Drawing.Font($script:Wizard.BaseFont.FontFamily, [float]($script:Wizard.BaseFont.Size * $factor))
+    $script:Wizard.Controls.Title.Font = New-Object System.Drawing.Font('Segoe UI', [float](14 * $factor), [System.Drawing.FontStyle]::Bold)
+    Set-WizardScaledBounds -Parent $form -Factor $factor
+}
+
 function New-WizardGrid {
     param([string[]]$Headers, [int[]]$Widths)
     $grid = New-Object System.Windows.Forms.DataGridView
@@ -833,11 +893,12 @@ function New-WizardGrid {
     $grid.MultiSelect = $false
     $grid.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
     $grid.AutoGenerateColumns = $false
+    Set-WizardGridScaling -Grid $grid
     for ($i = 0; $i -lt $Headers.Count; $i++) {
         $column = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
         $column.HeaderText = $Headers[$i]
         $column.Name = ('Column{0}' -f $i)
-        $column.Width = $Widths[$i]
+        $column.FillWeight = $Widths[$i]
         $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
         [void]$grid.Columns.Add($column)
     }
@@ -856,7 +917,8 @@ function Initialize-WizardUi {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = 'Windows Patch Wizard'
     $form.StartPosition = 'CenterScreen'
-    $form.MinimumSize = New-Object System.Drawing.Size(1050, 700)
+    $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
+    $form.MinimumSize = New-Object System.Drawing.Size(800, 540)
     $form.Size = New-Object System.Drawing.Size(1250, 820)
     $form.Padding = New-Object System.Windows.Forms.Padding(8)
     $script:Wizard.Form = $form
@@ -1041,10 +1103,11 @@ function Initialize-WizardUi {
     $selectGrid.MultiSelect = $false
     $selectGrid.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
     $selectGrid.AutoGenerateColumns = $false
+    Set-WizardGridScaling -Grid $selectGrid
     $checkColumn = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
     $checkColumn.HeaderText = 'Selected'
     $checkColumn.Name = 'Selected'
-    $checkColumn.Width = 65
+    $checkColumn.FillWeight = 65
     $checkColumn.ReadOnly = $false
     [void]$selectGrid.Columns.Add($checkColumn)
     $selectHeaders = @('VM', 'UpdateID', 'Revision', 'Title', 'Type', 'Labels')
@@ -1053,7 +1116,7 @@ function Initialize-WizardUi {
         $column = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
         $column.HeaderText = $selectHeaders[$i]
         $column.Name = ('SelectColumn{0}' -f $i)
-        $column.Width = $selectWidths[$i]
+        $column.FillWeight = $selectWidths[$i]
         $column.ReadOnly = $true
         $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
         [void]$selectGrid.Columns.Add($column)
@@ -1157,6 +1220,7 @@ function Initialize-WizardUi {
     $form.Controls.SetChildIndex($tabs, 0)
 
     $script:Wizard.Controls = @{
+        Title = $title
         VCenter = $vcText
         VmEntries = $vmText
         OutputRoot = $outputText
@@ -1189,20 +1253,25 @@ function Initialize-WizardUi {
         StatusText = $statusText
     }
 
-    # Controls follow the window size. Anchors are applied once the form is shown: WinForms measures
-    # anchor distances from the parent's size at that moment, and docked panels get their real size only then.
-    $stretch = [System.Windows.Forms.AnchorStyles]'Top, Left, Right'
-    $right = [System.Windows.Forms.AnchorStyles]'Top, Right'
-    $fill = [System.Windows.Forms.AnchorStyles]'Top, Bottom, Left, Right'
-    $script:Wizard.Anchors = @(
-        @($vcText, $stretch), @($vcButton, $right),
-        @($vmHint, $stretch), @($vmText, $stretch), @($loadFile, $right),
-        @($outputText, $stretch), @($browseOutput, $right),
-        @($certificateHint, $stretch), @($runPathLabel, $stretch),
-        @($installHint, $stretch), @($rebootHint, $stretch), @($verifyHint, $stretch),
-        @($progressLabel, $right), @($progress, $stretch), @($statusText, $fill)
-    )
-    $form.Add_Shown({ foreach ($item in $script:Wizard.Anchors) { $item[0].Anchor = $item[1] } })
+    # Fields that take up leftover space when the window is wider/taller than the zoom needs.
+    $script:Wizard.Stretch = @{}
+    foreach ($control in @($vcText, $vmHint, $vmText, $outputText, $certificateHint, $runPathLabel, $installHint, $rebootHint, $verifyHint, $progress)) { $script:Wizard.Stretch[$control] = 'Width' }
+    foreach ($control in @($vcButton, $loadFile, $browseOutput, $progressLabel)) { $script:Wizard.Stretch[$control] = 'Right' }
+    $script:Wizard.Stretch[$statusText] = 'Both'
+    $form.Add_Shown({
+        $script:Wizard.BaseClientSize = $script:Wizard.Form.ClientSize
+        $script:Wizard.BaseFont = $script:Wizard.Form.Font
+        $script:Wizard.LastWindowState = $script:Wizard.Form.WindowState
+        Save-WizardLayout -Parent $script:Wizard.Form
+    })
+    # Zoom after a drag ends (not during it, to avoid flicker) and after maximize/restore.
+    $form.Add_ResizeEnd({ Update-WizardScale })
+    $form.Add_SizeChanged({
+        if ($script:Wizard.Form.WindowState -ne $script:Wizard.LastWindowState) {
+            $script:Wizard.LastWindowState = $script:Wizard.Form.WindowState
+            Update-WizardScale
+        }
+    })
 
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 500
