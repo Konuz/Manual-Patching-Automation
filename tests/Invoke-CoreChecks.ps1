@@ -563,16 +563,16 @@ Write-Output ('result={0};stop={1}' -f $result.status, $saved.stopReason)
         $progressResult = Invoke-PatchAction -Action Scan -RunPath $progressRunPath -VCenterCredential $credential -GuestCredential $credential
         $savedProgress = Read-PatchRun -RunPath $progressRunPath
         $savedProgressVms = @($savedProgress.vms)
-        Assert-CoreEqual -Expected 'NeedsReview' -Actual ([string]$progressResult.status) -Message 'The representative progress action did not remain in review.'
+        Assert-CoreEqual -Expected 'CompletedWithErrors' -Actual ([string]$progressResult.status) -Message 'A failed VM did not mark the action as completed with errors.'
         Assert-CoreEqual -Expected 'Scan' -Actual ([string]$savedProgress.currentAction) -Message 'The current run action was not persisted.'
         Assert-CoreEqual -Expected 'Completed' -Actual ([string]$savedProgressVms[0].status) -Message 'The completed VM result was not preserved.'
         Assert-CoreEqual -Expected 'SkippedGuestAccount' -Actual ([string]$savedProgressVms[1].status) -Message 'The skipped VM result was not preserved.'
         Assert-CoreEqual -Expected 'Failed' -Actual ([string]$savedProgressVms[2].status) -Message 'The failed VM result was not preserved.'
-        Assert-CoreEqual -Expected 'PendingNeedsReview' -Actual ([string]$savedProgressVms[3].status) -Message 'The barrier VM result was not preserved.'
+        Assert-CoreEqual -Expected 'Completed' -Actual ([string]$savedProgressVms[3].status) -Message 'A failed VM blocked the next VM.'
         foreach ($vm in $savedProgressVms) {
             Assert-CoreEqual -Expected 'Scan' -Actual ([string]$vm.lastProcessedAction) -Message 'A processed VM did not persist the current action marker.'
         }
-        Assert-CoreTrue -Condition ([string]::IsNullOrWhiteSpace([string]$savedProgressVms[1].currentAction) -and [string]::IsNullOrWhiteSpace([string]$savedProgressVms[3].currentAction)) -Message 'A skipped or barrier VM retained a stale current action.'
+        Assert-CoreTrue -Condition ([string]::IsNullOrWhiteSpace([string]$savedProgressVms[1].currentAction)) -Message 'A skipped or barrier VM retained a stale current action.'
         Assert-CoreTrue -Condition (@(@(Get-PatchArray -Value $savedProgressVms[2].errors) | Where-Object { $_.code -eq 'PatchActionFailed' }).Count -eq 1) -Message 'The representative error was not persisted.'
 
         $script:CoreCheckConnectShouldFail = $true

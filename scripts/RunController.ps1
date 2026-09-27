@@ -1417,8 +1417,7 @@ function Add-PatchVmResult {
         [string]$VMName,
         [string]$Action,
         $VmResult,
-        [ref]$RebootBarrier,
-        [ref]$NeedsReviewBarrier
+        [ref]$RebootBarrier
     )
 
     $vmStatus = [string](Get-PatchValue $VmResult @('status') 'NeedsReview')
@@ -1433,16 +1432,9 @@ function Add-PatchVmResult {
             Set-PatchValue -InputObject $reboot -Name 'confirmedBootTime' -Value (Get-PatchValue (Get-PatchValue $VmResult @('step') $null) @('confirmedBootTime') $null)
         }
         else {
+            # An unconfirmed reboot stops the next reboot batches (plan: step 5).
             $RebootBarrier.Value = $true
         }
-    }
-    if ($vmStatus -eq 'NeedsReview' -or $vmStatus -eq 'PendingRebootConfirmation') {
-        if ($Action -eq 'Reboot') { $RebootBarrier.Value = $true }
-        else { $NeedsReviewBarrier.Value = $true }
-    }
-    if ($vmStatus -eq 'Failed' -or $vmStatus -eq 'NeedsReview') {
-        if ($Action -eq 'Reboot') { $RebootBarrier.Value = $true }
-        else { $NeedsReviewBarrier.Value = $true }
     }
     if ($vmStatus -eq 'Failed' -or $vmStatus -eq 'NeedsReview' -or $vmStatus -eq 'CompletedWithErrors') {
         $errorMessage = [string](Get-PatchValue $VmResult @('error') '')
@@ -1482,8 +1474,7 @@ function Add-PatchVmFailure {
         [string]$Action,
         [string]$ExceptionMessage,
         $GuestCredential,
-        [ref]$RebootBarrier,
-        [ref]$NeedsReviewBarrier
+        [ref]$RebootBarrier
     )
 
     $message = Protect-PatchText $ExceptionMessage
@@ -1496,7 +1487,6 @@ function Add-PatchVmFailure {
         Set-PatchValue -InputObject $VMRecord -Name 'rejectedGuestAccountIsLocal' -Value ([bool](-not [string]::IsNullOrWhiteSpace([string]$rejectedScope)))
     }
     if ($Action -eq 'Reboot') { $RebootBarrier.Value = $true }
-    elseif ($code -ne 'GuestCredentialRejected') { $NeedsReviewBarrier.Value = $true }
     $vmErrors = @(Get-PatchArray -Value (Get-PatchValue $VMRecord @('errors') @()))
     $vmErrors += [pscustomobject]@{ code = $code; message = $message; step = $Action }
     Set-PatchValue -InputObject $VMRecord -Name 'errors' -Value $vmErrors
@@ -1554,7 +1544,6 @@ function Invoke-PatchAction {
         $server = Connect-PatchVCenter -ServerName $serverName -Credential $VCenterCredential -IgnoreVCenterCertificate:([bool](Get-PatchOption $run @('ignoreVCenterCertificate') $false))
 
         $rebootBarrier = $false
-        $needsReviewBarrier = $false
         $rejectedAccountKeys = @{}
         $workLimit = 1
         if ($Action -eq 'Scan' -or $Action -eq 'Verify') {
@@ -1575,8 +1564,8 @@ function Invoke-PatchAction {
             $batchWork = @()
             for ($recordIndex = $batchStart; $recordIndex -lt $batchEnd; $recordIndex++) {
                 $vmRecord = $vmRecords[$recordIndex]
-                if (($Action -eq 'Reboot' -and $rebootBarrier) -or ($Action -ne 'Reboot' -and $needsReviewBarrier)) {
-                    $barrierStatus = if ($Action -eq 'Reboot') { 'PendingRebootBarrier' } else { 'PendingNeedsReview' }
+                if ($Action -eq 'Reboot' -and $rebootBarrier) {
+                    $barrierStatus = 'PendingRebootBarrier'
                     Set-PatchValue -InputObject $vmRecord -Name 'status' -Value $barrierStatus
                     Set-PatchValue -InputObject $vmRecord -Name 'lastProcessedAction' -Value $Action
                     Save-PatchDecision -RunPath $runFile -RunState $run
@@ -1647,7 +1636,7 @@ function Invoke-PatchAction {
                     $startResult = Invoke-PatchVmAction -Action $Action -RunPath $runFile -RunState $run -VMRecord $vmRecord -Server $server -GuestCredential $GuestCredential -StartOnly
                     $startStatus = [string](Get-PatchValue $startResult @('status') 'NeedsReview')
                     if ($startStatus -eq 'NeedsReview' -or $startStatus -eq 'Failed' -or $startStatus -eq 'CompletedWithErrors' -or $startStatus -eq 'PendingRebootConfirmation') {
-                        $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -VmResult $startResult -RebootBarrier ([ref]$rebootBarrier) -NeedsReviewBarrier ([ref]$needsReviewBarrier)
+                        $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -VmResult $startResult -RebootBarrier ([ref]$rebootBarrier)
                     }
                     else {
                         Set-PatchValue -InputObject $vmRecord -Name 'status' -Value 'Started'
@@ -1656,7 +1645,7 @@ function Invoke-PatchAction {
                     }
                 }
                 catch {
-                    $failureResult = Add-PatchVmFailure -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -ExceptionMessage $_.Exception.Message -GuestCredential $GuestCredential -RebootBarrier ([ref]$rebootBarrier) -NeedsReviewBarrier ([ref]$needsReviewBarrier)
+                    $failureResult = Add-PatchVmFailure -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -ExceptionMessage $_.Exception.Message -GuestCredential $GuestCredential -RebootBarrier ([ref]$rebootBarrier)
                     if ([string]::Equals([string](Get-PatchValue $failureResult @('status') ''), 'GuestCredentialRejected', [System.StringComparison]::OrdinalIgnoreCase)) {
                         $rejectedKey = [string](Get-PatchValue $vmRecord @('rejectedGuestAccountKey') '')
                         if (-not [string]::IsNullOrWhiteSpace($rejectedKey)) { $rejectedAccountKeys[$rejectedKey] = $true }
@@ -1671,10 +1660,10 @@ function Invoke-PatchAction {
                 $vmName = [string](Get-PatchValue $work @('vmName') '')
                 try {
                     $vmResult = Invoke-PatchVmAction -Action $Action -RunPath $runFile -RunState $run -VMRecord $vmRecord -Server $server -GuestCredential $GuestCredential
-                    $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -VmResult $vmResult -RebootBarrier ([ref]$rebootBarrier) -NeedsReviewBarrier ([ref]$needsReviewBarrier)
+                    $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -VmResult $vmResult -RebootBarrier ([ref]$rebootBarrier)
                 }
                 catch {
-                    $failureResult = Add-PatchVmFailure -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -ExceptionMessage $_.Exception.Message -GuestCredential $GuestCredential -RebootBarrier ([ref]$rebootBarrier) -NeedsReviewBarrier ([ref]$needsReviewBarrier)
+                    $failureResult = Add-PatchVmFailure -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -ExceptionMessage $_.Exception.Message -GuestCredential $GuestCredential -RebootBarrier ([ref]$rebootBarrier)
                     if ([string]::Equals([string](Get-PatchValue $failureResult @('status') ''), 'GuestCredentialRejected', [System.StringComparison]::OrdinalIgnoreCase)) {
                         $rejectedKey = [string](Get-PatchValue $vmRecord @('rejectedGuestAccountKey') '')
                         if (-not [string]::IsNullOrWhiteSpace($rejectedKey)) { $rejectedAccountKeys[$rejectedKey] = $true }
@@ -1684,7 +1673,7 @@ function Invoke-PatchAction {
             }
         }
 
-        $needsReview = @($resultRows | Where-Object { $_.status -eq 'NeedsReview' -or $_.status -eq 'PendingRebootConfirmation' -or $_.status -eq 'PendingRebootBarrier' -or $_.status -eq 'PendingNeedsReview' -or $_.status -eq 'GuestCredentialRejectedPendingDecision' -or $_.status -eq 'SkippedAccountPendingDecision' }).Count -gt 0
+        $needsReview = @($resultRows | Where-Object { $_.status -eq 'NeedsReview' -or $_.status -eq 'PendingRebootConfirmation' -or $_.status -eq 'PendingRebootBarrier' -or $_.status -eq 'GuestCredentialRejectedPendingDecision' -or $_.status -eq 'SkippedAccountPendingDecision' }).Count -gt 0
         $hasErrors = @($resultRows | Where-Object { $_.status -match 'Rejected|Failed|Blocked|Error|Mismatch' -or $_.status -eq 'PatchActionFailed' }).Count -gt 0
         if ($needsReview) { Set-PatchValue -InputObject $run -Name 'status' -Value 'NeedsReview' }
         elseif ($hasErrors) { Set-PatchValue -InputObject $run -Name 'status' -Value 'CompletedWithErrors' }
