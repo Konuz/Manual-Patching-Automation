@@ -885,6 +885,7 @@ function Initialize-WizardUi {
     $settingsTab.Padding = New-Object System.Windows.Forms.Padding(10)
     $settingsPanel = New-Object System.Windows.Forms.Panel
     $settingsPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $settingsPanel.AutoScroll = $true
     $settingsTab.Controls.Add($settingsPanel)
     [void]$tabs.TabPages.Add($settingsTab)
 
@@ -1032,10 +1033,9 @@ function Initialize-WizardUi {
     })
     $selectHint = New-WizardLabel -Text 'All offered updates are selected initially. Uncheck individual rows; Driver, Browse-only, and EULA required labels are shown.' -X 8 -Y 37 -Width 1000 -Height 26
     $selectHint.ForeColor = [System.Drawing.Color]::DimGray
+    $selectHint.Dock = [System.Windows.Forms.DockStyle]::Top
     $selectGrid = New-Object System.Windows.Forms.DataGridView
-    $selectGrid.Location = New-Object System.Drawing.Point(8, 68)
-    $selectGrid.Size = New-Object System.Drawing.Size(1120, 600)
-    $selectGrid.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $selectGrid.Dock = [System.Windows.Forms.DockStyle]::Fill
     $selectGrid.AllowUserToAddRows = $false
     $selectGrid.AllowUserToDeleteRows = $false
     $selectGrid.MultiSelect = $false
@@ -1143,21 +1143,14 @@ function Initialize-WizardUi {
     $progressLabel = New-WizardLabel -Text 'No active run' -X 705 -Y 0 -Width 350 -Height 22
     $progress = New-Object System.Windows.Forms.ProgressBar
     $progress.Location = New-Object System.Drawing.Point(0, 24)
-    $progress.Size = New-Object System.Drawing.Size(1060, 18)
-    $progress.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left
+    $progress.Size = New-Object System.Drawing.Size(1210, 18)
     $statusText = New-Object System.Windows.Forms.TextBox
     $statusText.Location = New-Object System.Drawing.Point(0, 48)
-    $statusText.Size = New-Object System.Drawing.Size(1160, 65)
+    $statusText.Size = New-Object System.Drawing.Size(1210, 65)
     $statusText.Multiline = $true
     $statusText.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
     $statusText.ReadOnly = $true
-    $statusText.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
     $statusPanel.Controls.AddRange(@($statusLabel, $progressLabel, $progress, $statusText))
-    $statusPanel.Add_Resize({
-        param($sender, $eventArgs)
-        $bar = @($sender.Controls | Where-Object { $_ -is [System.Windows.Forms.ProgressBar] })[0]
-        if ($null -ne $bar) { $bar.Width = [Math]::Max(1, $sender.ClientSize.Width - $bar.Left - 8) }
-    })
     $form.Controls.Add($statusPanel)
     $form.Controls.SetChildIndex($header, 2)
     $form.Controls.SetChildIndex($statusPanel, 1)
@@ -1195,6 +1188,21 @@ function Initialize-WizardUi {
         ProgressBar = $progress
         StatusText = $statusText
     }
+
+    # Controls follow the window size. Anchors are applied once the form is shown: WinForms measures
+    # anchor distances from the parent's size at that moment, and docked panels get their real size only then.
+    $stretch = [System.Windows.Forms.AnchorStyles]'Top, Left, Right'
+    $right = [System.Windows.Forms.AnchorStyles]'Top, Right'
+    $fill = [System.Windows.Forms.AnchorStyles]'Top, Bottom, Left, Right'
+    $script:Wizard.Anchors = @(
+        @($vcText, $stretch), @($vcButton, $right),
+        @($vmHint, $stretch), @($vmText, $stretch), @($loadFile, $right),
+        @($outputText, $stretch), @($browseOutput, $right),
+        @($certificateHint, $stretch), @($runPathLabel, $stretch),
+        @($installHint, $stretch), @($rebootHint, $stretch), @($verifyHint, $stretch),
+        @($progressLabel, $right), @($progress, $stretch), @($statusText, $fill)
+    )
+    $form.Add_Shown({ foreach ($item in $script:Wizard.Anchors) { $item[0].Anchor = $item[1] } })
 
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 500
