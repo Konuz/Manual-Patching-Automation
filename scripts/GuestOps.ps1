@@ -204,10 +204,9 @@ function Resolve-PatchTransferUrl {
         [Parameter(Mandatory = $true)][string]$EsxiHostName
     )
 
-    if ($Url.StartsWith('https://*/', [System.StringComparison]::OrdinalIgnoreCase)) {
-        return $Url.Substring(0, 8) + $EsxiHostName + $Url.Substring(9)
-    }
-    return $Url
+    # Through vCenter the URL already holds the ESXi address; a standalone host returns
+    # "*" (e.g. https://*:443/guestFile?...), which must be replaced with the host name.
+    return ($Url -replace '^https://\*(?=[:/])', ('https://' + $EsxiHostName))
 }
 
 function Invoke-PatchCurl {
@@ -221,32 +220,6 @@ function Invoke-PatchCurl {
         # Do not include the transfer URL: vSphere embeds a one-time token in it.
         throw ('curl.exe failed with exit code {0}.' -f $LASTEXITCODE)
     }
-}
-
-function Test-GuestTransferEndpoint {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][ValidateNotNull()]$Context,
-        [bool]$IgnoreEsxiCertificate = $false
-    )
-
-    $url = 'https://{0}/' -f $Context.EsxiHostName
-    $curlArguments = @('--disable')
-    if ($IgnoreEsxiCertificate) {
-        $curlArguments += '--insecure'
-    }
-    $curlArguments += @(
-        '--silent',
-        '--show-error',
-        '--head',
-        '--output',
-        'NUL',
-        '--max-time',
-        '30',
-        $url
-    )
-    Invoke-PatchCurl -Arguments $curlArguments
-    return [pscustomobject]@{ EsxiHostName = $Context.EsxiHostName; Reachable = $true }
 }
 
 function Send-GuestFile {

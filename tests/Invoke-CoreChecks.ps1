@@ -412,17 +412,6 @@ Write-Output ('result={0};stop={1}' -f $result.status, $saved.stopReason)
         Assert-CoreTrue -Condition ($errors -notmatch [regex]::Escape($script:CoreCheckFailureSecret) -and $summary -notmatch [regex]::Escape($script:CoreCheckFailureSecret)) -Message 'The failure secret leaked into output.'
     } | Out-Null
 
-    function Test-GuestTransferEndpoint {
-        [CmdletBinding()]
-        param(
-            [object]$Context,
-            [bool]$IgnoreEsxiCertificate = $false
-        )
-
-        $script:CoreCheckTransferCertificateFlags += [bool]$IgnoreEsxiCertificate
-        return [pscustomobject]@{ Reachable = $true }
-    }
-
     function Send-GuestFile {
         [CmdletBinding()]
         param(
@@ -661,9 +650,9 @@ Write-Output ('result={0};stop={1}' -f $result.status, $saved.stopReason)
         Assert-CoreEqual -Expected 2 -Actual $script:CoreCheckVCenterCertificateFlags.Count -Message 'The vCenter channel was not observed for both variants.'
         Assert-CoreEqual -Expected $true -Actual $script:CoreCheckVCenterCertificateFlags[0] -Message 'The vCenter ignore flag was not passed for the first variant.'
         Assert-CoreEqual -Expected $false -Actual $script:CoreCheckVCenterCertificateFlags[1] -Message 'The vCenter ignore flag leaked from the first variant.'
-        Assert-CoreEqual -Expected 4 -Actual $script:CoreCheckTransferCertificateFlags.Count -Message 'The ESXi transfer channel was not observed for both actions.'
-        Assert-CoreTrue -Condition ((-not $script:CoreCheckTransferCertificateFlags[0]) -and (-not $script:CoreCheckTransferCertificateFlags[1])) -Message 'The first variant enabled insecure ESXi transfers.'
-        Assert-CoreTrue -Condition ($script:CoreCheckTransferCertificateFlags[2] -and $script:CoreCheckTransferCertificateFlags[3]) -Message 'The second variant did not enable insecure ESXi transfers.'
+        Assert-CoreEqual -Expected 2 -Actual $script:CoreCheckTransferCertificateFlags.Count -Message 'The ESXi transfer channel was not observed for both actions.'
+        Assert-CoreTrue -Condition (-not $script:CoreCheckTransferCertificateFlags[0]) -Message 'The first variant enabled insecure ESXi transfers.'
+        Assert-CoreTrue -Condition ($script:CoreCheckTransferCertificateFlags[1]) -Message 'The second variant did not enable insecure ESXi transfers.'
     } | Out-Null
 
     Invoke-CoreCheck -Name 'Guest account skips stay opaque, isolate local VMs, and block rejected actions' -ScriptBlock {

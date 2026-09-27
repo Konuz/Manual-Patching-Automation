@@ -1082,9 +1082,6 @@ function Invoke-PatchAgentStep {
 
     if (-not [bool](Get-PatchValue $step @('startAttempted') $false)) {
         Save-PatchDecision -RunPath $RunPath -RunState $RunState
-        if ($null -ne (Get-Command -Name 'Test-GuestTransferEndpoint' -ErrorAction SilentlyContinue)) {
-            Test-GuestTransferEndpoint -Context $Context -IgnoreEsxiCertificate:([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)) | Out-Null
-        }
         Send-GuestFile -Context $Context -LocalPath $agentPath -GuestPath $guestPaths.agent -IgnoreEsxiCertificate:([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)) | Out-Null
         $selectionPath = $null
         if ($Action -eq 'Install') {
