@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project guidelines (from the owner)
 
-- **Simplicity is the main rule.** Do not complicate simple things. Before implementing, ask whether the task can be done more simply than `Plan.md` or the request assumes, and say so (push back) when it can.
+- **Simplicity is the main rule.** Do not complicate simple things. Before implementing, ask whether the task can be done more simply than the request assumes, and say so (push back) when it can.
 - No tests or safeguards for unrealistic scenarios, nor for realistic ones that are unlikely and need several specific conditions at once.
-- Tests only for real needs: the six key behaviours listed in `Plan.md` (see Tests below). Do not add checks beyond them without a clear reason.
+- Tests only for real needs: the six key behaviours of the original plan – selecting the right VM, excluding cluster members, installing only approved `UpdateID + RevisionNumber` pairs, writing errors and the summary, independent certificate options, and no second install or reboot after resume. Do not add checks beyond them without a clear reason.
 - Do not guess syntax or API behaviour: check Microsoft documentation or Context7 (or verify empirically in a scratch script) before relying on it.
 - Patching happens in explicit operator steps and must stay as simple and readable as possible, both functionally and visually, for the supervising engineer.
 - Commit after each fix.
-- `Plan.md` (Polish) is the source of truth for behaviour. Everything in the implementation is in English: code, GUI texts, messages, logs, reports and documentation.
+- `README.md` describes the current behaviour. The original plan (Polish) is kept locally in `docs/Plan.md`, which is git-ignored and may be absent. Everything in the implementation is in English: code, GUI texts, messages, logs, reports and documentation.
 
 ## Commands
 
