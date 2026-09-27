@@ -1011,7 +1011,7 @@ function Wait-PatchAgent {
         }
 
         if ((Get-Date).ToUniversalTime() -ge $deadline) { break }
-        Start-Sleep -Seconds 1
+        Start-Sleep -Seconds 10
     }
     $timeoutMessage = 'The guest agent did not produce matching terminal status evidence before the timeout.'
     if (-not [string]::IsNullOrWhiteSpace([string]$lastError)) { $timeoutMessage += ' Last read error: ' + (Protect-PatchText $lastError) }

@@ -1316,7 +1316,7 @@ function Initialize-WizardUi {
     $timer.Start()
     $form.Add_FormClosing({
         if ($null -ne $script:Wizard.ActivePowerShell) {
-            $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, 'An action is still running. Close the window and leave the background action to finish?', 'Close Patch Wizard', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, 'An action is still running. Closing stops monitoring on this workstation; agents already started in the guests keep running. Use Resume run later to continue. Close now?', 'Close Patch Wizard', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
             if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { $_.Cancel = $true; return }
             try { $script:Wizard.ActivePowerShell.Dispose() } catch { }
             $script:Wizard.ActivePowerShell = $null
