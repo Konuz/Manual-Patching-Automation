@@ -7,7 +7,7 @@ Windows Patch Wizard is a PowerShell 5.1 WinForms operator tool for scanning, se
 Run the launcher from **64-bit Windows PowerShell 5.1** on the control workstation:
 
 ```powershell
-Set-Location 'F:\Apki\Patching Automation v2'
+Set-Location '<repository folder>'
 & .\Start-PatchWizard.ps1
 ```
 
@@ -44,7 +44,7 @@ The groups are shown in the **Account group** column and saved in `run.json`; th
 
 ## Operator workflow
 
-The wizard presents six steps. Actions that can change a guest require a separate explicit approval in the corresponding step.
+The wizard presents six steps. Actions that can change a guest require a separate explicit approval in the corresponding step. The window content (fields, buttons, fonts, tabs) scales with the window size.
 
 1. **Settings** — choose the vCenter, vCenter credential, VM entries, run folder, and concurrency. Create a new run or choose **Resume run**.
 2. **Scan** — start the scan. The guest reports offered updates, pending reboot state, and cluster membership.
@@ -91,11 +91,12 @@ The six checks cover the key behaviours named in the plan: selecting the right V
 Before production use:
 
 1. Confirm the PowerShell 5.1 bitness, PowerCLI import, curl availability, vCenter access, guest permissions, and running VMware Tools.
-2. Select one disposable, nonproduction VM and enter its exact name and expected FQDN.
+2. Select one disposable, nonproduction VM and enter its exact name (optionally with its expected FQDN).
 3. Run Scan, review the offered updates and cluster state, select a small approved set, then approve Install.
 4. Review per-update results and approve Reboot only when the wizard reports fresh pending reboot evidence.
 5. Complete Verify and inspect the files written for the run, including `run.log`, any `errors.log`, per-step `status-*.json` and `agent-*.log`, `summary.md`, and `summary.csv`.
 6. Repeat the pilot after closing the GUI during Install and after reboot dispatch; use Resume run and confirm that the existing step is observed instead of started again.
 7. Enter a wrong guest password once and confirm that the Retry / Skip these VMs / Stop dialog appears.
+8. With a list that mixes domain VMs and a DMZ VM, confirm the **Account group** column and that one credential is asked per domain and one for the DMZ VM.
 
 Do not use a production VM for the first pilot. Cluster members and VMs with an unknown cluster state remain blocked for install and reboot.
