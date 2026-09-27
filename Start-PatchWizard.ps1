@@ -31,7 +31,6 @@ $script:Wizard = @{
     BaseFont = $null
     BaseLayout = @{}
     Stretch = @{}
-    LastWindowState = $null
 }
 
 $savedPreference = $ErrorActionPreference
@@ -871,14 +870,18 @@ function Set-WizardScaledBounds {
 }
 
 function Update-WizardScale {
-    # Zooms the window content (positions, sizes, fonts, tabs) with the window by the smaller of the
+    # Zooms the window content (positions, sizes, fonts, tabs) live with the window by the smaller of the
     # width and height ratios to the first shown size. Always computed from that reference, so
     # repeated resizing does not drift.
     $form = $script:Wizard.Form
     if ($script:Wizard.BaseLayout.Count -eq 0 -or $form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) { return }
     $factor = [Math]::Min($form.ClientSize.Width / $script:Wizard.BaseClientSize.Width, $form.ClientSize.Height / $script:Wizard.BaseClientSize.Height)
-    $form.Font = New-Object System.Drawing.Font($script:Wizard.BaseFont.FontFamily, [float]($script:Wizard.BaseFont.Size * $factor))
-    $script:Wizard.Controls.Title.Font = New-Object System.Drawing.Font('Segoe UI', [float](14 * $factor), [System.Drawing.FontStyle]::Bold)
+    # Fonts are recreated only when the size changes by a visible step (0.25 pt), which keeps dragging smooth.
+    $fontSize = [float]([Math]::Round($script:Wizard.BaseFont.Size * $factor * 4) / 4)
+    if ($fontSize -ne $form.Font.Size) {
+        $form.Font = New-Object System.Drawing.Font($script:Wizard.BaseFont.FontFamily, $fontSize)
+        $script:Wizard.Controls.Title.Font = New-Object System.Drawing.Font('Segoe UI', [float]([Math]::Round(14 * $factor * 4) / 4), [System.Drawing.FontStyle]::Bold)
+    }
     Set-WizardScaledBounds -Parent $form -Factor $factor
 }
 
@@ -1261,17 +1264,12 @@ function Initialize-WizardUi {
     $form.Add_Shown({
         $script:Wizard.BaseClientSize = $script:Wizard.Form.ClientSize
         $script:Wizard.BaseFont = $script:Wizard.Form.Font
-        $script:Wizard.LastWindowState = $script:Wizard.Form.WindowState
         Save-WizardLayout -Parent $script:Wizard.Form
     })
-    # Zoom after a drag ends (not during it, to avoid flicker) and after maximize/restore.
-    $form.Add_ResizeEnd({ Update-WizardScale })
-    $form.Add_SizeChanged({
-        if ($script:Wizard.Form.WindowState -ne $script:Wizard.LastWindowState) {
-            $script:Wizard.LastWindowState = $script:Wizard.Form.WindowState
-            Update-WizardScale
-        }
-    })
+    # Live zoom while the window is dragged, maximized or restored; every tab behaves the same.
+    $form.Add_Resize({ Update-WizardScale })
+    # A hidden tab page gets its new size only when shown, so place its content again then.
+    $tabs.Add_SelectedIndexChanged({ Update-WizardScale })
 
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 500
