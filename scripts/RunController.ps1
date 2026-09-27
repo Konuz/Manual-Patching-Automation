@@ -596,6 +596,8 @@ function Get-PatchStep {
     for ($index = $steps.Count - 1; $index -ge 0; $index--) {
         $step = $steps[$index]
         if ([string]::Equals([string](Get-PatchValue $step @('action') ''), $Action, [System.StringComparison]::OrdinalIgnoreCase) -and [int](Get-PatchValue $step @('round') 0) -eq $Round) {
+            # A confirmed reboot is finished; another pending reboot in the same round needs a new step.
+            if ($Action -eq 'Reboot' -and [string](Get-PatchValue $step @('status') '') -eq 'Confirmed') { break }
             return $step
         }
     }
