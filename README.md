@@ -30,11 +30,15 @@ app-02.example.test
 DMZ-WEB|dmz-web.dmz.local
 ```
 
-A name must resolve to exactly one VM on the selected vCenter. An FQDN that is not a VM name is looked up by its short name (`app-02`). The FQDN is optional; when one is given, VMware Tools must report it, otherwise the VM is blocked.
+Enter one or more vCenters in **vCenter server(s)**, separated by commas. Each VM is looked up on all of them and bound to the one that has it; a name found on more than one vCenter is blocked.
+
+A name must resolve to exactly one VM. An FQDN that is not a VM name is looked up by its short name (`app-02`). The FQDN is optional; when one is given, VMware Tools must report it, otherwise the VM is blocked.
 
 ## Guest credentials
 
-Before the first action, the wizard finds the VMs in vCenter (vCenter credential only) and groups them by the DNS suffix VMware Tools reports:
+One vCenter credential is asked for and used for every vCenter (typical with shared SSO). If a vCenter rejects it, the wizard asks for a separate credential for that vCenter only.
+
+Before the first action, the wizard finds the VMs in vCenter (vCenter credentials only) and groups them by the DNS suffix VMware Tools reports:
 
 - VMs with the same suffix (e.g. `example.test`) share one prompt: **Guest credential for domain example.test**.
 - A VM without a suffix, typically a DMZ server with its own local administrator, gets its own prompt.
@@ -46,7 +50,7 @@ The groups are shown in the **Account group** column and saved in `run.json`; th
 
 The wizard presents six steps. Actions that can change a guest require a separate explicit approval in the corresponding step. The window content (fields, buttons, fonts, tabs) scales with the window size.
 
-1. **Settings** — choose the vCenter, vCenter credential, VM entries, run folder, and concurrency. Create a new run or choose **Resume run**.
+1. **Settings** — choose the vCenter(s), vCenter credential, VM entries, run folder, and concurrency. Create a new run or choose **Resume run**.
 2. **Scan** — start the scan. The guest reports offered updates, pending reboot state, and cluster membership.
 3. **Select updates** — review the per-VM list, including optional updates and drivers, then approve the selected `UpdateID + RevisionNumber` values for installation.
 4. **Install** — approve installation. The agent searches again and installs only the still-offered selected revisions. The agent does not reboot the guest.
@@ -97,6 +101,7 @@ Before production use:
 5. Complete Verify and inspect the files written for the run, including `run.log`, any `errors.log`, per-step `status-*.json` and `agent-*.log`, `summary.md`, and `summary.csv`.
 6. Repeat the pilot after closing the GUI during Install and after reboot dispatch; use Resume run and confirm that the existing step is observed instead of started again.
 7. Enter a wrong guest password once and confirm that the Retry / Skip these VMs / Stop dialog appears.
-8. With a list that mixes domain VMs and a DMZ VM, confirm the **Account group** column and that one credential is asked per domain and one for the DMZ VM.
+8. With two vCenters, confirm that each VM shows the vCenter it was found on (in `summary.csv`) and that a vCenter with a different password asks for its own credential.
+9. With a list that mixes domain VMs and a DMZ VM, confirm the **Account group** column and that one credential is asked per domain and one for the DMZ VM.
 
 Do not use a production VM for the first pilot. Cluster members and VMs with an unknown cluster state remain blocked for install and reboot.

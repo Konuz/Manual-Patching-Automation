@@ -40,12 +40,13 @@ $script:ConnectFails = $false
 $script:VCenterFlags = @()
 $script:EsxiFlags = @()
 $script:AgentStarts = 0
-function Get-VM { param([string]$Name, $Server, [string]$Id) $script:VmLookup }
+$script:VmByServer = $null
+function Get-VM { param([string]$Name, $Server, [string]$Id) if ($null -ne $script:VmByServer) { $script:VmByServer[[string]$Server] } else { $script:VmLookup } }
 function Connect-PatchVCenter {
     param([string]$ServerName, $Credential, [bool]$IgnoreVCenterCertificate)
     $script:VCenterFlags += $IgnoreVCenterCertificate
     if ($script:ConnectFails) { throw 'vCenter refused check-secret' }
-    return 'server-double'
+    return $ServerName
 }
 function Get-GuestContext { param($VM, $GuestCredential) $script:GuestContext }
 function Send-GuestFile { param($Context, [string]$LocalPath, [string]$GuestPath, [bool]$IgnoreEsxiCertificate) $script:EsxiFlags += $IgnoreEsxiCertificate }
@@ -77,6 +78,15 @@ try {
         Assert ((Get-PatchVM -Server 's' -Name 'app03.example.test').Id -eq 'vm-3') 'An FQDN entry was not found by its short VM name.'
         Assert ((Get-PatchAccountGroup -HostName 'app03.corp.local' -VmName 'app03') -eq 'corp.local') 'A domain VM was not grouped by its DNS suffix.'
         Assert ((Get-PatchAccountGroup -HostName 'dmz01' -VmName 'dmz01') -eq 'vm:dmz01') 'A VM without a DNS suffix did not get its own credential group.'
+        # Several vCenters: a VM is bound to the one vCenter that has it; a name on two vCenters is blocked.
+        $path = (New-PatchRun -Config ([pscustomobject]@{ VCenter = 'vc1, vc2'; OutputRoot = (Join-Path $testRoot 'multi') }) -VMEntries @(
+                [pscustomobject]@{ VmName = 'APP[01]'; ExpectedFqdn = '' }, [pscustomobject]@{ VmName = 'app03'; ExpectedFqdn = '' })).runPath
+        $script:VmByServer = @{ vc1 = @(New-TestVm 'vm-1'); vc2 = @((New-TestVm 'vm-9'), (New-TestVm 'vm-3' 'app03.example.test' 'app03')) }
+        [void](Resolve-PatchVms -RunPath $path -VCenterCredentials @{ '*' = $credential })
+        $script:VmByServer = $null
+        $vms = (Read-PatchRun $path).vms
+        Assert ($vms[1].vCenter -eq 'vc2' -and $vms[1].vmId -eq 'vm-3') 'A VM was not bound to the vCenter that has it.'
+        Assert ($vms[0].status -eq 'Failed' -and [string]::IsNullOrEmpty([string]$vms[0].vCenter)) 'A VM name found on two vCenters was not blocked.'
     }
 
     Invoke-Check 'Cluster members and unknown cluster states are excluded from install and reboot' {
@@ -94,8 +104,10 @@ try {
 
     Invoke-Check 'A controller error is written to errors.log and the summary at once, without secrets' {
         $script:ConnectFails = $true
-        $run = New-TestRun 'failure'
-        $result = Invoke-PatchAction -Action Scan -RunPath $run.runPath -VCenterCredential $credential -GuestCredentials @{}
+        $run = Read-PatchRun (New-TestRun 'failure').runPath
+        Set-PatchValue $run.vms[0] 'vCenter' 'vcenter-double'   # only vCenters that hold VMs are contacted
+        Write-PatchRun -RunPath $run.runPath -RunState $run | Out-Null
+        $result = Invoke-PatchAction -Action Scan -RunPath $run.runPath -VCenterCredentials @{ '*' = $credential } -GuestCredentials @{}
         $script:ConnectFails = $false
         $dir = Split-Path -Parent $run.runPath
         $errors = Get-Content (Join-Path $dir 'errors.log') -Raw
@@ -110,8 +122,8 @@ try {
         foreach ($case in @(@{ VCenter = $true; Esxi = $false }, @{ VCenter = $false; Esxi = $true })) {
             $script:VCenterFlags = @(); $script:EsxiFlags = @()
             $run = New-TestRun 'certificates' ([pscustomobject]@{ IgnoreVCenterCertificate = $case.VCenter; IgnoreEsxiCertificatesForFileTransfers = $case.Esxi })
-            [void](Resolve-PatchVms -RunPath $run.runPath -VCenterCredential $credential)
-            $result = Invoke-PatchAction -Action Scan -RunPath $run.runPath -VCenterCredential $credential -GuestCredentials @{ 'example.test' = $credential }
+            [void](Resolve-PatchVms -RunPath $run.runPath -VCenterCredentials @{ '*' = $credential })
+            $result = Invoke-PatchAction -Action Scan -RunPath $run.runPath -VCenterCredentials @{ '*' = $credential } -GuestCredentials @{ 'example.test' = $credential }
             $saved = Read-PatchRun $run.runPath
             Assert ($result.status -eq 'Completed') "The scan did not complete: $($result.vmResults | ConvertTo-Json -Compress)"
             Assert ($saved.options.ignoreVCenterCertificate -eq $case.VCenter -and $saved.options.ignoreEsxiCertificatesForFileTransfers -eq $case.Esxi) 'The choices were not saved in run.json.'

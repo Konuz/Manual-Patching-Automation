@@ -2,8 +2,9 @@
 # Public functions:
 #   New-PatchRun(config, VM entries) creates runs/<runId>/run.json without credentials.
 #   Read-PatchRun, Write-PatchRun, Write-PatchEvent, Write-PatchError persist run state and logs.
-#   Resolve-PatchVms(RunPath, VCenterCredential) finds the VMs in vCenter and groups them for guest credentials.
-#   Invoke-PatchAction(Action, RunPath, VCenterCredential, GuestCredentials) runs one operator step.
+#   Resolve-PatchVms(RunPath, VCenterCredentials) finds each VM on one of the vCenters and groups it for guest credentials.
+#   Invoke-PatchAction(Action, RunPath, VCenterCredentials, GuestCredentials) runs one operator step.
+#   VCenterCredentials: vCenter name -> PSCredential; the key '*' is used for every vCenter without its own.
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -234,7 +235,8 @@ function New-PatchRun {
     # Config comes from the GUI: VCenter, OutputRoot and Options (missing options use the plan defaults).
     $options = Get-PatchValue $Config @('Options') $null
     $option = { param([string]$Name, $Default) $value = Get-PatchValue $options @($Name) $null; if ($null -eq $value) { $Default } else { $value } }
-    $vCenter = [string](Get-PatchValue $Config @('VCenter') '')
+    # One or more vCenters, separated by commas, semicolons or spaces.
+    $vCenters = @(([string](Get-PatchValue $Config @('VCenter') '')) -split '[,;\s]+' | Where-Object { $_ })
     $root = [string](Get-PatchValue $Config @('OutputRoot') '')
     if ([string]::IsNullOrWhiteSpace($root)) { $root = Join-Path (Split-Path -Parent $PSScriptRoot) 'runs' }
     $runId = [Guid]::NewGuid().ToString('D')
@@ -254,6 +256,7 @@ function New-PatchRun {
         $vmRecords += [ordered]@{
             vmName = $name
             expectedFqdn = $expectedFqdn
+            vCenter = $null
             vmId = $null
             guestHostName = $null
             accountGroup = $null
@@ -280,7 +283,7 @@ function New-PatchRun {
         createdAt = Get-PatchUtcNow
         updatedAt = Get-PatchUtcNow
         status = 'Created'
-        vCenter = $vCenter
+        vCenters = $vCenters
         options = [ordered]@{
             ignoreVCenterCertificate = [bool](& $option 'IgnoreVCenterCertificate' $false)
             ignoreEsxiCertificatesForFileTransfers = [bool](& $option 'IgnoreEsxiCertificatesForFileTransfers' $false)
@@ -401,6 +404,7 @@ function Write-PatchSummary {
             RunId = [string](Get-PatchValue $RunState @('runId') '')
             VMName = $name
             ExpectedFqdn = $fqdn
+            VCenter = [string](Get-PatchValue $vm @('vCenter') '')
             VMId = [string](Get-PatchValue $vm @('vmId') '')
             Status = $status
             InstalledUpdates = $installedText
@@ -809,7 +813,7 @@ function Invoke-PatchVmAction {
 
     # Get-PatchVM checks the name or saved ID, the FQDN when one is expected, power state and VMware Tools.
     $vm = Get-PatchVM -Server $Server -Name $VMRecord.vmName -ExpectedFqdn $VMRecord.expectedFqdn -SavedId $VMRecord.vmId
-    Set-PatchVmBinding -VMRecord $VMRecord -VM $vm
+    Set-PatchVmBinding -VMRecord $VMRecord -VM $vm -VCenter $VMRecord.vCenter
     Save-PatchDecision -RunPath $RunPath -RunState $RunState
     $context = Get-GuestContext -VM $vm -GuestCredential $GuestCredential
 
@@ -882,8 +886,9 @@ function Get-PatchAccountGroup {
 
 function Set-PatchVmBinding {
     # Binds the run entry to the vCenter VM found for it and records its credential group.
-    param($VMRecord, $VM)
+    param($VMRecord, $VM, [string]$VCenter)
     if ([string]::IsNullOrWhiteSpace([string]$VMRecord.vmId)) {
+        Set-PatchValue -InputObject $VMRecord -Name 'vCenter' -Value $VCenter
         if ($VMRecord.vmName -ne [string]$VM.Name) {
             # An FQDN-shaped entry found by its short name: the entry becomes the expected FQDN.
             if ([string]::IsNullOrWhiteSpace([string]$VMRecord.expectedFqdn)) { Set-PatchValue -InputObject $VMRecord -Name 'expectedFqdn' -Value $VMRecord.vmName }
@@ -898,30 +903,53 @@ function Set-PatchVmBinding {
     }
 }
 
+function Connect-PatchVCenters {
+    # Connects to the given vCenters. A vCenter that rejects its credential is reported instead of
+    # stopping the run, so the GUI can ask for a separate credential for it.
+    param([string[]]$Names, [hashtable]$Credentials, [bool]$IgnoreCertificate)
+    $servers = @{}
+    $rejected = @()
+    foreach ($name in $Names) {
+        $credential = if ($Credentials.ContainsKey($name)) { $Credentials[$name] } else { $Credentials['*'] }
+        try { $servers[$name] = Connect-PatchVCenter -ServerName $name -Credential $credential -IgnoreVCenterCertificate $IgnoreCertificate }
+        catch { if (Test-PatchLoginRejected $_.Exception) { $rejected += $name } else { throw } }
+    }
+    return [pscustomobject]@{ Servers = $servers; Rejected = $rejected }
+}
+
 function Resolve-PatchVms {
-    # Before the first guest action: find each VM in vCenter and group it for guest credentials.
-    # Only the vCenter credential is needed. A VM that cannot be found yet is tried again next time.
+    # Before the first guest action: find each VM on the listed vCenters and group it for guest
+    # credentials. A name found on more than one vCenter is ambiguous and blocks the VM (plan).
+    # Only vCenter credentials are needed. A VM that cannot be found yet is tried again next time.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$RunPath,
-        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$VCenterCredential
+        [Parameter(Mandatory = $true)][hashtable]$VCenterCredentials
     )
 
-    Register-PatchCredential -Credential $VCenterCredential
+    foreach ($credential in $VCenterCredentials.Values) { Register-PatchCredential -Credential $credential }
     $run = Read-PatchRun -RunPath $RunPath
     try {
-        $server = Connect-PatchVCenter -ServerName $run.vCenter -Credential $VCenterCredential -IgnoreVCenterCertificate ([bool]$run.options.ignoreVCenterCertificate)
+        $connection = Connect-PatchVCenters -Names $run.vCenters -Credentials $VCenterCredentials -IgnoreCertificate ([bool]$run.options.ignoreVCenterCertificate)
+        if ($connection.Rejected.Count -gt 0) {
+            return [pscustomobject]@{ status = 'Stopped'; action = 'Resolve'; rejectedVCenters = $connection.Rejected; error = ('The credential was rejected by: {0}' -f ($connection.Rejected -join ', ')) }
+        }
         $rebootBarrier = $false
         foreach ($vmRecord in @(Get-PatchArray $run.vms)) {
             if (-not [string]::IsNullOrWhiteSpace([string]$vmRecord.accountGroup) -or $vmRecord.status -eq 'SkippedGuestAccount') { continue }
-            try {
-                $vm = Get-PatchVM -Server $server -Name $vmRecord.vmName -ExpectedFqdn $vmRecord.expectedFqdn -SavedId $vmRecord.vmId
-                Set-PatchVmBinding -VMRecord $vmRecord -VM $vm
-                Write-PatchEvent -RunPath $RunPath -Message ('Found in vCenter. Guest host name: {0}. Credential group: {1}.' -f $vmRecord.guestHostName, $vmRecord.accountGroup) -VMName $vmRecord.vmName -Step 'Resolve'
+            $found = @()
+            $lastError = $null
+            foreach ($name in $run.vCenters) {
+                try { $found += [pscustomobject]@{ VCenter = $name; VM = (Get-PatchVM -Server $connection.Servers[$name] -Name $vmRecord.vmName -ExpectedFqdn $vmRecord.expectedFqdn -SavedId $vmRecord.vmId) } }
+                catch { if ($_.Exception.Message -notmatch 'found 0\.$' -or $null -eq $lastError) { $lastError = $_.Exception.Message } }
             }
-            catch {
-                [void](Add-PatchVmResult -RunPath $RunPath -RunState $run -VMRecord $vmRecord -Action 'Resolve' -Result ([pscustomobject]@{ status = 'Failed'; error = $_.Exception.Message }) -RebootBarrier ([ref]$rebootBarrier))
+            if ($found.Count -eq 1) {
+                Set-PatchVmBinding -VMRecord $vmRecord -VM $found[0].VM -VCenter $found[0].VCenter
+                Write-PatchEvent -RunPath $RunPath -Message ('Found on {0}. Guest host name: {1}. Account group: {2}.' -f $vmRecord.vCenter, $vmRecord.guestHostName, $vmRecord.accountGroup) -VMName $vmRecord.vmName -Step 'Resolve'
+                continue
             }
+            $message = if ($found.Count -gt 1) { 'The VM name was found on several vCenters: {0}.' -f (($found | ForEach-Object { $_.VCenter }) -join ', ') } else { $lastError }
+            [void](Add-PatchVmResult -RunPath $RunPath -RunState $run -VMRecord $vmRecord -Action 'Resolve' -Result ([pscustomobject]@{ status = 'Failed'; error = $message }) -RebootBarrier ([ref]$rebootBarrier))
         }
         Save-PatchDecision -RunPath $RunPath -RunState $run
         Write-PatchSummary -RunPath $RunPath -RunState $run
@@ -940,13 +968,12 @@ function Invoke-PatchAction {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('Scan', 'Install', 'Reboot', 'Verify')][string]$Action,
         [Parameter(Mandatory = $true)][string]$RunPath,
-        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$VCenterCredential,
+        [Parameter(Mandatory = $true)][hashtable]$VCenterCredentials,
         # Guest credentials by credential group (see Get-PatchAccountGroup); kept in memory only.
         [Parameter(Mandatory = $true)][hashtable]$GuestCredentials
     )
 
-    Register-PatchCredential -Credential $VCenterCredential
-    foreach ($credential in $GuestCredentials.Values) { Register-PatchCredential -Credential $credential }
+    foreach ($credential in @($VCenterCredentials.Values) + @($GuestCredentials.Values)) { Register-PatchCredential -Credential $credential }
     $run = $null
     $resultRows = @()
     try {
@@ -963,9 +990,13 @@ function Invoke-PatchAction {
         Save-PatchDecision -RunPath $runFile -RunState $run
         Write-PatchSummary -RunPath $runFile -RunState $run
 
-        $serverName = [string](Get-PatchValue $run @('vCenter') '')
-        if ([string]::IsNullOrWhiteSpace($serverName)) { throw 'The run has no vCenter server name.' }
-        $server = Connect-PatchVCenter -ServerName $serverName -Credential $VCenterCredential -IgnoreVCenterCertificate:([bool](Get-PatchOption $run @('ignoreVCenterCertificate') $false))
+        # Only the vCenters that hold VMs of this run.
+        $connection = Connect-PatchVCenters -Names @($vmRecords | ForEach-Object { [string]$_.vCenter } | Where-Object { $_ } | Sort-Object -Unique) -Credentials $VCenterCredentials -IgnoreCertificate ([bool](Get-PatchOption $run @('ignoreVCenterCertificate') $false))
+        if ($connection.Rejected.Count -gt 0) {
+            Set-PatchValue -InputObject $run -Name 'status' -Value 'Stopped'
+            Save-PatchDecision -RunPath $runFile -RunState $run
+            return [pscustomobject]@{ status = 'Stopped'; action = $Action; rejectedVCenters = $connection.Rejected; error = ('The credential was rejected by: {0}' -f ($connection.Rejected -join ', ')); vmResults = @() }
+        }
 
         $rebootBarrier = $false
         $workLimit = switch ($Action) {
@@ -983,7 +1014,7 @@ function Invoke-PatchAction {
                 return [pscustomobject]@{ status = 'Failed'; error = ('No guest credential was entered for {0}.' -f $VMRecord.accountGroup) }
             }
             try {
-                Invoke-PatchVmAction -Action $Action -RunPath $runFile -RunState $run -VMRecord $VMRecord -Server $server -GuestCredential $guestCredential -StartOnly:$StartOnly
+                Invoke-PatchVmAction -Action $Action -RunPath $runFile -RunState $run -VMRecord $VMRecord -Server $connection.Servers[[string]$VMRecord.vCenter] -GuestCredential $guestCredential -StartOnly:$StartOnly
             }
             catch {
                 # Get-GuestContext raises InvalidCredentialException when the guest rejects the account;

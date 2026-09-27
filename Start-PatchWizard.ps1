@@ -15,7 +15,7 @@ $script:Wizard = @{
     Timer = $null
     RunPath = $null
     RunState = $null
-    VCenterCredential = $null
+    VCenterCredentials = @{}
     GuestCredentials = @{}
     PendingAction = $null
     ActivePowerShell = $null
@@ -180,7 +180,7 @@ function Set-WizardSettingsFromRun {
 
     $controls = $script:Wizard.Controls
     $options = $RunState.options
-    $controls.VCenter.Text = [string]$RunState.vCenter
+    $controls.VCenter.Text = (@($RunState.vCenters) -join ', ')
     # runPath is <output root>\<runId>\run.json
     $controls.OutputRoot.Text = Split-Path -Parent (Split-Path -Parent ([string]$RunState.runPath))
     $controls.ScanConcurrency.Text = [string]$options.scanConcurrency
@@ -201,7 +201,7 @@ function New-WizardRun {
         $entries = ConvertTo-WizardVmEntries -Text $script:Wizard.Controls.VmEntries.Text
         $script:Wizard.RunState = New-PatchRun -Config $config -VMEntries $entries
         $script:Wizard.RunPath = [string](Get-PatchValue $script:Wizard.RunState @('runPath') '')
-        $script:Wizard.VCenterCredential = $null
+        $script:Wizard.VCenterCredentials = @{}
         $script:Wizard.GuestCredentials = @{}
         $script:Wizard.Controls.OpenLogs.Enabled = $true
         $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}' -f $script:Wizard.RunPath)
@@ -216,12 +216,14 @@ function New-WizardRun {
 }
 
 function Request-WizardCredential {
-    param([ValidateSet('vCenter')][string]$Kind = 'vCenter')
+    # '*' is the credential for every vCenter; a vCenter that rejects it gets its own (see Complete-WizardAction).
+    param([string]$VCenter = '*')
 
-    $credential = Get-Credential -Message 'Enter the vCenter credential for this run.'
+    $message = if ($VCenter -eq '*') { 'Enter the vCenter credential for this run (used for every vCenter).' } else { 'vCenter {0} rejected the shared credential. Enter the credential for {0}.' -f $VCenter }
+    $credential = Get-Credential -Message $message
     if ($null -eq $credential) { return }
-    $script:Wizard.VCenterCredential = $credential
-    Set-WizardStatus -Message ('vCenter credential held in memory for {0}.' -f $credential.UserName)
+    $script:Wizard.VCenterCredentials[$VCenter] = $credential
+    Set-WizardStatus -Message ('vCenter credential for {0} held in memory.' -f $VCenter)
 }
 
 function Request-WizardGuestCredentials {
@@ -257,7 +259,7 @@ function Resume-WizardRun {
         $script:Wizard.RunState = $state
         $script:Wizard.RunPath = $dialog.FileName
         # Credentials are never saved; they are asked for again when the next action starts.
-        $script:Wizard.VCenterCredential = $null
+        $script:Wizard.VCenterCredentials = @{}
         $script:Wizard.GuestCredentials = @{}
         Set-WizardSettingsFromRun -RunState $state
         $script:Wizard.Controls.OpenLogs.Enabled = $true
@@ -567,8 +569,8 @@ function Start-WizardAction {
     try {
         if ($null -ne $script:Wizard.ActivePowerShell) { throw 'An action is already running.' }
         if ($null -eq $script:Wizard.RunState -or [string]::IsNullOrWhiteSpace([string]$script:Wizard.RunPath)) { throw 'Create or resume a run first.' }
-        if ($null -eq $script:Wizard.VCenterCredential) { Request-WizardCredential }
-        if ($null -eq $script:Wizard.VCenterCredential) { throw 'The vCenter credential is required.' }
+        if (-not $script:Wizard.VCenterCredentials.ContainsKey('*')) { Request-WizardCredential }
+        if (-not $script:Wizard.VCenterCredentials.ContainsKey('*')) { throw 'The vCenter credential is required.' }
         $credentialDecision = Resolve-WizardCredentialRejection -Action $Action
         if ($credentialDecision -in @('Skip', 'Stop', 'Cancel')) { return }
         if ($Action -eq 'Install' -and -not $ApprovalAlreadyGiven) {
@@ -611,11 +613,11 @@ function Start-WizardWorker {
     param([Parameter(Mandatory = $true)][string]$Action)
 
     $workerScript = {
-        param($ControllerPath, $ActionName, $RunFilePath, $VCenterCredential, $GuestCredentials)
+        param($ControllerPath, $ActionName, $RunFilePath, $VCenterCredentials, $GuestCredentials)
         try {
             . $ControllerPath
-            if ($ActionName -eq 'Resolve') { return (Resolve-PatchVms -RunPath $RunFilePath -VCenterCredential $VCenterCredential) }
-            return (Invoke-PatchAction -Action $ActionName -RunPath $RunFilePath -VCenterCredential $VCenterCredential -GuestCredentials $GuestCredentials)
+            if ($ActionName -eq 'Resolve') { return (Resolve-PatchVms -RunPath $RunFilePath -VCenterCredentials $VCenterCredentials) }
+            return (Invoke-PatchAction -Action $ActionName -RunPath $RunFilePath -VCenterCredentials $VCenterCredentials -GuestCredentials $GuestCredentials)
         }
         catch {
             return [pscustomobject]@{ status = 'Stopped'; action = $ActionName; error = $_.Exception.Message }
@@ -626,7 +628,7 @@ function Start-WizardWorker {
     [void]$powerShell.AddArgument($script:ControllerPath)
     [void]$powerShell.AddArgument($Action)
     [void]$powerShell.AddArgument([string]$script:Wizard.RunPath)
-    [void]$powerShell.AddArgument($script:Wizard.VCenterCredential)
+    [void]$powerShell.AddArgument($script:Wizard.VCenterCredentials)
     [void]$powerShell.AddArgument($script:Wizard.GuestCredentials)
     $script:Wizard.ActivePowerShell = $powerShell
     $script:Wizard.ActiveAsyncResult = $powerShell.BeginInvoke()
@@ -660,6 +662,24 @@ function Complete-WizardAction {
     }
     catch {
         Set-WizardStatus -Message ('Action finished, but run state could not be read: {0}' -f $_.Exception.Message)
+    }
+
+    # A vCenter rejected the shared credential: ask for its own credential and run the same step again.
+    $rejectedVCenters = @(Get-PatchValue $result @('rejectedVCenters') @())
+    if ($rejectedVCenters.Count -gt 0) {
+        foreach ($name in $rejectedVCenters) {
+            $script:Wizard.VCenterCredentials.Remove($name)
+            Request-WizardCredential -VCenter $name
+            if (-not $script:Wizard.VCenterCredentials.ContainsKey($name)) {
+                $script:Wizard.PendingAction = $null
+                Show-WizardError -Message ('Stopped: no credential was entered for vCenter {0}.' -f $name)
+                Update-WizardStepState
+                return
+            }
+        }
+        if ($action -eq 'Resolve') { Start-WizardWorker -Action 'Resolve' }
+        else { Start-WizardAction -Action $action -ApprovalAlreadyGiven -VmsResolved }
+        return
     }
 
     if ($action -eq 'Resolve') {
@@ -967,13 +987,13 @@ function Initialize-WizardUi {
     $settingsTab.Controls.Add($settingsPanel)
     [void]$tabs.TabPages.Add($settingsTab)
 
-    $vcLabel = New-WizardLabel -Text 'vCenter server' -X 10 -Y 12
+    $vcLabel = New-WizardLabel -Text 'vCenter server(s)' -X 10 -Y 12
     $vcText = New-WizardTextBox -X 155 -Y 9 -Width 360
     $vcButton = New-Object System.Windows.Forms.Button
     $vcButton.Text = 'Get vCenter credential'
     $vcButton.Location = New-Object System.Drawing.Point(530, 8)
     $vcButton.Size = New-Object System.Drawing.Size(170, 27)
-    $vcButton.Add_Click({ Request-WizardCredential -Kind vCenter })
+    $vcButton.Add_Click({ Request-WizardCredential })
 
     $vmLabel = New-WizardLabel -Text 'VM entries' -X 10 -Y 48
     $vmHint = New-WizardLabel -Text 'One per line: VM name, FQDN, or VM name|FQDN. Guest credentials are asked per domain.' -X 155 -Y 48 -Width 710 -Height 22
@@ -1048,6 +1068,7 @@ function Initialize-WizardUi {
     $toolTip = New-Object System.Windows.Forms.ToolTip
     $toolTip.AutoPopDelay = 15000
     $hints = @(
+        @($vcLabel, $vcText, 'One or more vCenters, separated by commas. Each VM is looked up on all of them; a name found on more than one is blocked.'),
         @($concurrencyLabel, $scanConcurrency, 'How many VMs are scanned at the same time (Scan and Verify). Default: 3.'),
         @($installConcurrencyLabel, $installConcurrency, 'How many VMs install updates at the same time. Default: 3.'),
         @($rebootBatchLabel, $rebootBatch, 'How many VMs are restarted together. The next batch starts only after every VM in this batch reports a newer boot time. Default: 1.'),

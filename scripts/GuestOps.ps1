@@ -15,14 +15,23 @@ function Connect-PatchVCenter {
 
     Import-Module VMware.VimAutomation.Core -ErrorAction Stop
 
-    if ($IgnoreVCenterCertificate) {
-        Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -Confirm:$false -ErrorAction Stop | Out-Null
-    }
-    else {
-        Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Fail -Confirm:$false -ErrorAction Stop | Out-Null
-    }
+    # Multiple: several vCenter connections stay usable at once (Single keeps only the last one).
+    $certificateAction = if ($IgnoreVCenterCertificate) { 'Ignore' } else { 'Fail' }
+    Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction $certificateAction -DefaultVIServerMode Multiple -Confirm:$false -ErrorAction Stop | Out-Null
 
     return (Connect-VIServer -Server $ServerName -Credential $Credential -ErrorAction Stop)
+}
+
+function Test-PatchLoginRejected {
+    # True when vCenter rejected the user name or password (compared by type name, so PowerCLI
+    # types need not be loaded).
+    param([System.Exception]$Exception)
+    for ($current = $Exception; $null -ne $current; $current = $current.InnerException) {
+        if ($current.GetType().FullName -eq 'VMware.VimAutomation.ViCore.Types.V1.ErrorHandling.InvalidLogin') { return $true }
+        $fault = $current.PSObject.Properties['MethodFault']
+        if ($null -ne $fault -and $null -ne $fault.Value -and $fault.Value.GetType().Name -eq 'InvalidLogin') { return $true }
+    }
+    return $false
 }
 
 function Get-GuestFault {
