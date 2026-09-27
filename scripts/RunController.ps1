@@ -835,90 +835,40 @@ function Invoke-PatchVmAction {
 }
 
 function Add-PatchVmResult {
-    param(
-        [string]$RunPath,
-        $RunState,
-        $VMRecord,
-        [string]$VMName,
-        [string]$Action,
-        $VmResult,
-        [ref]$RebootBarrier
-    )
+    # Records one VM's result in run.json and run.log; problems also go to errors.log at once.
+    param([string]$RunPath, $RunState, $VMRecord, [string]$Action, $Result, [ref]$RebootBarrier)
 
-    $vmStatus = [string](Get-PatchValue $VmResult @('status') 'NeedsReview')
-    Set-PatchValue -InputObject $VMRecord -Name 'status' -Value $vmStatus
-    if ($null -ne (Get-PatchValue $VmResult @('agentStatus') $null)) {
-        Set-PatchValue -InputObject $VMRecord -Name 'agentStatus' -Value (Get-PatchValue $VmResult @('agentStatus') $null)
-    }
-    if ($Action -eq 'Reboot') {
-        $reboot = Get-PatchValue $VMRecord @('reboot') ([pscustomobject]@{})
-        Set-PatchValue -InputObject $reboot -Name 'status' -Value $vmStatus
-        if ($vmStatus -eq 'Confirmed') {
-            Set-PatchValue -InputObject $reboot -Name 'confirmedBootTime' -Value (Get-PatchValue (Get-PatchValue $VmResult @('step') $null) @('confirmedBootTime') $null)
+    $vmName = [string]$VMRecord.vmName
+    $status = [string]$Result.status
+    Set-PatchValue -InputObject $VMRecord -Name 'status' -Value $status
+    Set-PatchValue -InputObject $VMRecord -Name 'lastProcessedAction' -Value $Action
+    $agentStatus = Get-PatchValue $Result @('agentStatus') $null
+    if ($null -ne $agentStatus) { Set-PatchValue -InputObject $VMRecord -Name 'agentStatus' -Value $agentStatus }
+
+    if ($Action -eq 'Reboot' -and $status -notlike 'Skipped*' -and $status -ne 'PendingRebootBarrier') {
+        Set-PatchValue -InputObject $VMRecord.reboot -Name 'status' -Value $status
+        if ($status -eq 'Confirmed') {
+            Set-PatchValue -InputObject $VMRecord.reboot -Name 'confirmedBootTime' -Value $Result.step.confirmedBootTime
         }
         else {
             # An unconfirmed reboot stops the next reboot batches (plan: step 5).
             $RebootBarrier.Value = $true
         }
     }
-    if ($vmStatus -eq 'Failed' -or $vmStatus -eq 'NeedsReview' -or $vmStatus -eq 'CompletedWithErrors') {
-        $errorMessage = [string](Get-PatchValue $VmResult @('error') '')
-        if (-not [string]::IsNullOrWhiteSpace($errorMessage)) {
-            $errorMessage = Protect-PatchText $errorMessage
-            $errorCode = if ($vmStatus -eq 'Failed') { 'PatchActionFailed' } elseif ($vmStatus -eq 'CompletedWithErrors') { 'PatchActionPartialFailure' } else { 'PatchActionNeedsReview' }
-            $vmErrors = @(Get-PatchArray -Value (Get-PatchValue $VMRecord @('errors') @()))
-            $duplicateError = @($vmErrors | Where-Object {
-                    [string]::Equals([string](Get-PatchValue $_ @('code') ''), $errorCode, [System.StringComparison]::OrdinalIgnoreCase) -and
-                    [string]::Equals([string](Get-PatchValue $_ @('message') ''), $errorMessage, [System.StringComparison]::Ordinal)
-                }).Count -gt 0
-            if (-not $duplicateError) {
-                $vmErrors += [pscustomobject]@{ code = $errorCode; message = $errorMessage; step = $Action }
-                Set-PatchValue -InputObject $VMRecord -Name 'errors' -Value $vmErrors
-                Set-PatchValue -InputObject $VMRecord -Name 'errorLinks' -Value @('errors.log')
-                $errorRecord = Write-PatchError -RunPath $RunPath -Message $errorMessage -VMName $VMName -Step $Action -Code $errorCode
-                $runErrors = @(Get-PatchArray -Value (Get-PatchValue $RunState @('errors') @()))
-                $runErrors += $errorRecord
-                Set-PatchValue -InputObject $RunState -Name 'errors' -Value $runErrors
-            }
-        }
+
+    $message = [string](Get-PatchValue $Result @('error') '')
+    $level = 'INFO'
+    if (-not [string]::IsNullOrWhiteSpace($message)) {
+        $message = Protect-PatchText $message
+        $level = 'ERROR'
+        Set-PatchValue -InputObject $VMRecord -Name 'errors' -Value @(@(Get-PatchArray $VMRecord.errors) + [pscustomobject]@{ code = $status; message = $message; step = $Action })
+        Set-PatchValue -InputObject $VMRecord -Name 'errorLinks' -Value @('errors.log')
+        $errorRecord = Write-PatchError -RunPath $RunPath -Message $message -VMName $vmName -Step $Action -Code $status
+        Set-PatchValue -InputObject $RunState -Name 'errors' -Value @(@(Get-PatchArray $RunState.errors) + $errorRecord)
     }
-    Set-PatchValue -InputObject $VMRecord -Name 'lastProcessedAction' -Value $Action
     Save-PatchDecision -RunPath $RunPath -RunState $RunState
-    $eventLevel = 'WARN'
-    if ($vmStatus -eq 'Completed' -or $vmStatus -eq 'Confirmed') { $eventLevel = 'INFO' }
-    Write-PatchEvent -RunPath $RunPath -Message ('Action result: {0}' -f $vmStatus) -VMName $VMName -Step $Action -Level $eventLevel
-    return [pscustomobject]@{ vmName = $VMName; status = $vmStatus; error = Get-PatchValue $VmResult @('error') $null }
-}
-
-function Add-PatchVmFailure {
-    param(
-        [string]$RunPath,
-        $RunState,
-        $VMRecord,
-        [string]$VMName,
-        [string]$Action,
-        [System.Exception]$Exception,
-        [ref]$RebootBarrier
-    )
-
-    $message = Protect-PatchText $Exception.Message
-    # Get-GuestContext raises InvalidCredentialException when the guest rejects the account;
-    # the GUI then offers Retry, Skip, or Stop (plan: step 1).
-    $code = if ($Exception -is [System.Security.Authentication.InvalidCredentialException]) { 'GuestCredentialRejected' } else { 'Failed' }
-    Set-PatchValue -InputObject $VMRecord -Name 'status' -Value $code
-    if ($Action -eq 'Reboot') { $RebootBarrier.Value = $true }
-    $vmErrors = @(Get-PatchArray -Value (Get-PatchValue $VMRecord @('errors') @()))
-    $vmErrors += [pscustomobject]@{ code = $code; message = $message; step = $Action }
-    Set-PatchValue -InputObject $VMRecord -Name 'errors' -Value $vmErrors
-    Set-PatchValue -InputObject $VMRecord -Name 'errorLinks' -Value @('errors.log')
-    $errorRecord = Write-PatchError -RunPath $RunPath -Message $message -VMName $VMName -Step $Action -Code $code
-    $runErrors = @(Get-PatchArray -Value (Get-PatchValue $RunState @('errors') @()))
-    $runErrors += $errorRecord
-    Set-PatchValue -InputObject $RunState -Name 'errors' -Value $runErrors
-    Set-PatchValue -InputObject $VMRecord -Name 'lastProcessedAction' -Value $Action
-    Save-PatchDecision -RunPath $RunPath -RunState $RunState
-    Write-PatchEvent -RunPath $RunPath -Message $message -VMName $VMName -Step $Action -Level 'ERROR'
-    return [pscustomobject]@{ vmName = $VMName; status = $code; error = $message }
+    Write-PatchEvent -RunPath $RunPath -Message (('Result: {0}. {1}' -f $status, $message).Trim()) -VMName $vmName -Step $Action -Level $level
+    return [pscustomobject]@{ vmName = $vmName; status = $status; error = $message }
 }
 
 function Invoke-PatchAction {
@@ -937,11 +887,7 @@ function Invoke-PatchAction {
     try {
         $run = Read-PatchRun -RunPath $RunPath
         $runFile = Get-PatchRunJsonPath -RunPath $RunPath
-        $runDirectory = Get-PatchRunDirectory -RunPath $RunPath
-        $wasResumed = -not [string]::Equals([string](Get-PatchValue $run @('status') 'Created'), 'Created', [System.StringComparison]::OrdinalIgnoreCase)
-        $startMessage = 'Patch action started.'
-        if ($wasResumed) { $startMessage = 'Patch action resumed.' }
-        Write-PatchEvent -RunPath $runFile -Message $startMessage -Step $Action
+        Write-PatchEvent -RunPath $runFile -Message ('{0} started.' -f $Action) -Step $Action
         Set-PatchValue -InputObject $run -Name 'status' -Value 'Running'
         Set-PatchValue -InputObject $run -Name 'currentAction' -Value $Action
         $vmRecords = @(Get-PatchArray -Value (Get-PatchValue $run @('vms') @()))
@@ -957,99 +903,52 @@ function Invoke-PatchAction {
         $server = Connect-PatchVCenter -ServerName $serverName -Credential $VCenterCredential -IgnoreVCenterCertificate:([bool](Get-PatchOption $run @('ignoreVCenterCertificate') $false))
 
         $rebootBarrier = $false
-        $workLimit = 1
-        if ($Action -eq 'Scan' -or $Action -eq 'Verify') {
-            $workLimit = [int](Get-PatchOption $run @('scanConcurrency') 3)
+        $workLimit = switch ($Action) {
+            'Install' { [int](Get-PatchOption $run @('installConcurrency') 3) }
+            'Reboot' { [int](Get-PatchOption $run @('rebootBatchSize') 1) }
+            default { [int](Get-PatchOption $run @('scanConcurrency') 3) }
         }
-        elseif ($Action -eq 'Install') {
-            $workLimit = [int](Get-PatchOption $run @('installConcurrency') 3)
+        $invokeVm = {
+            param($VMRecord, [bool]$StartOnly)
+            try {
+                Invoke-PatchVmAction -Action $Action -RunPath $runFile -RunState $run -VMRecord $VMRecord -Server $server -GuestCredential $GuestCredential -StartOnly:$StartOnly
+            }
+            catch {
+                # Get-GuestContext raises InvalidCredentialException when the guest rejects the account;
+                # the GUI then offers Retry, Skip or Stop (plan: step 1).
+                $code = if ($_.Exception -is [System.Security.Authentication.InvalidCredentialException]) { 'GuestCredentialRejected' } else { 'Failed' }
+                [pscustomobject]@{ status = $code; error = $_.Exception.Message }
+            }
         }
-        elseif ($Action -eq 'Reboot') {
-            $workLimit = [int](Get-PatchOption $run @('rebootBatchSize') 1)
-        }
-        if ($workLimit -lt 1) { $workLimit = 1 }
-        for ($batchStart = 0; $batchStart -lt $vmRecords.Count; $batchStart += $workLimit) {
-            $batchEnd = [Math]::Min($vmRecords.Count, $batchStart + $workLimit)
 
-            # Start every VM in this bounded batch first. The second pass waits for
-            # terminal evidence, so at most workLimit guest processes are active.
-            $batchWork = @()
-            for ($recordIndex = $batchStart; $recordIndex -lt $batchEnd; $recordIndex++) {
-                $vmRecord = $vmRecords[$recordIndex]
-                if ($Action -eq 'Reboot' -and $rebootBarrier) {
-                    $barrierStatus = 'PendingRebootBarrier'
-                    Set-PatchValue -InputObject $vmRecord -Name 'status' -Value $barrierStatus
-                    Set-PatchValue -InputObject $vmRecord -Name 'lastProcessedAction' -Value $Action
-                    Save-PatchDecision -RunPath $runFile -RunState $run
-                    $resultRows += [pscustomobject]@{ vmName = [string](Get-PatchValue $vmRecord @('vmName') ''); status = $barrierStatus; error = $null }
+        for ($batchStart = 0; $batchStart -lt $vmRecords.Count; $batchStart += [Math]::Max(1, $workLimit)) {
+            # Start every VM of the batch, then wait for each; at most workLimit agents run at once.
+            $started = @()
+            foreach ($vmRecord in @($vmRecords[$batchStart..([Math]::Min($vmRecords.Count, $batchStart + [Math]::Max(1, $workLimit)) - 1)])) {
+                $skip = $null
+                if ($Action -eq 'Reboot' -and $rebootBarrier) { $skip = 'PendingRebootBarrier' }
+                elseif ($vmRecord.status -eq 'SkippedGuestAccount') { $skip = 'SkippedGuestAccount' }
+                elseif ($Action -eq 'Install' -and @(Get-PatchArray $vmRecord.selectedUpdates).Count -eq 0) { $skip = 'SkippedNoSelection' }
+                elseif ($Action -eq 'Reboot' -and -not (Test-PatchVmRequiresReboot -VMRecord $vmRecord)) { $skip = 'SkippedNoReboot' }
+                if ($null -ne $skip) {
+                    $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = $skip; error = $null }) -RebootBarrier ([ref]$rebootBarrier)
                     continue
                 }
 
-                $vmName = [string](Get-PatchValue $vmRecord @('vmName') '')
-                if ([string](Get-PatchValue $vmRecord @('status') '') -eq 'SkippedGuestAccount') {
-                    Set-PatchValue -InputObject $vmRecord -Name 'lastProcessedAction' -Value $Action
-                    Save-PatchDecision -RunPath $runFile -RunState $run
-                    Write-PatchEvent -RunPath $runFile -Message 'Skipped because the operator skipped the rejected guest account for this run.' -VMName $vmName -Step $Action -Level 'WARN'
-                    $resultRows += [pscustomobject]@{ vmName = $vmName; status = 'SkippedGuestAccount'; error = $null }
-                    continue
-                }
-                if ($Action -eq 'Install' -and @(Get-PatchArray -Value (Get-PatchValue $vmRecord @('selectedUpdates') @())).Count -eq 0) {
-                    Set-PatchValue -InputObject $vmRecord -Name 'status' -Value 'SkippedNoSelection'
-                    $skipRound = [int](Get-PatchValue $vmRecord @('currentRound') (Get-PatchValue $run @('currentRound') 1))
-                    $skippedHistory = @(Get-PatchArray -Value (Get-PatchValue $vmRecord @('skippedUpdates') @()))
-                    $hasRoundSkip = @($skippedHistory | Where-Object {
-                            [string]::Equals([string](Get-PatchValue $_ @('reason') ''), 'No updates selected.', [System.StringComparison]::Ordinal) -and
-                            [int](Get-PatchValue $_ @('round') 0) -eq $skipRound
-                        }).Count -gt 0
-                    if (-not $hasRoundSkip) {
-                        $skippedHistory += [pscustomobject]@{ reason = 'No updates selected.'; round = $skipRound }
-                    }
-                    Set-PatchValue -InputObject $vmRecord -Name 'skippedUpdates' -Value $skippedHistory
-                    Set-PatchValue -InputObject $vmRecord -Name 'lastProcessedAction' -Value $Action
-                    Save-PatchDecision -RunPath $runFile -RunState $run
-                    Write-PatchEvent -RunPath $runFile -Message 'Installation skipped because no updates were selected for this VM.' -VMName $vmName -Step $Action
-                    $resultRows += [pscustomobject]@{ vmName = $vmName; status = 'SkippedNoSelection'; error = $null }
-                    continue
-                }
-                if ($Action -eq 'Reboot' -and -not (Test-PatchVmRequiresReboot -VMRecord $vmRecord)) {
-                    Set-PatchValue -InputObject $vmRecord -Name 'status' -Value 'SkippedNoReboot'
-                    Set-PatchValue -InputObject $vmRecord -Name 'reboot' -Value ([pscustomobject]@{ status = 'SkippedNoReboot'; required = $false; baselineBootTime = $null; requestEvidence = $null; confirmedBootTime = $null })
-                    Set-PatchValue -InputObject $vmRecord -Name 'lastProcessedAction' -Value $Action
-                    Save-PatchDecision -RunPath $runFile -RunState $run
-                    Write-PatchEvent -RunPath $runFile -Message 'Reboot skipped because no pending reboot was recorded.' -VMName $vmName -Step $Action
-                    $resultRows += [pscustomobject]@{ vmName = $vmName; status = 'SkippedNoReboot'; error = $null }
-                    continue
-                }
                 Set-PatchValue -InputObject $vmRecord -Name 'currentAction' -Value $Action
-                Save-PatchDecision -RunPath $runFile -RunState $run
-                try {
-                    $startResult = Invoke-PatchVmAction -Action $Action -RunPath $runFile -RunState $run -VMRecord $vmRecord -Server $server -GuestCredential $GuestCredential -StartOnly
-                    $startStatus = [string](Get-PatchValue $startResult @('status') 'NeedsReview')
-                    if ($startStatus -eq 'NeedsReview' -or $startStatus -eq 'Failed' -or $startStatus -eq 'CompletedWithErrors' -or $startStatus -eq 'PendingRebootConfirmation') {
-                        $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -VmResult $startResult -RebootBarrier ([ref]$rebootBarrier)
-                    }
-                    else {
-                        Set-PatchValue -InputObject $vmRecord -Name 'status' -Value 'Started'
-                        Save-PatchDecision -RunPath $runFile -RunState $run
-                        $batchWork += [pscustomobject]@{ vmRecord = $vmRecord; vmName = $vmName }
-                    }
+                $result = & $invokeVm $vmRecord $true
+                if ($result.status -eq 'Started') {
+                    Set-PatchValue -InputObject $vmRecord -Name 'status' -Value 'Started'
+                    Save-PatchDecision -RunPath $runFile -RunState $run
+                    $started += $vmRecord
                 }
-                catch {
-                    $resultRows += Add-PatchVmFailure -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -Exception $_.Exception -RebootBarrier ([ref]$rebootBarrier)
+                else {
+                    $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result $result -RebootBarrier ([ref]$rebootBarrier)
                 }
             }
-
-            # Wait for every started VM in this batch before opening another batch.
-            foreach ($work in @($batchWork)) {
-                $vmRecord = $work.vmRecord
-                $vmName = [string](Get-PatchValue $work @('vmName') '')
-                try {
-                    $vmResult = Invoke-PatchVmAction -Action $Action -RunPath $runFile -RunState $run -VMRecord $vmRecord -Server $server -GuestCredential $GuestCredential
-                    $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -VmResult $vmResult -RebootBarrier ([ref]$rebootBarrier)
-                }
-                catch {
-                    $resultRows += Add-PatchVmFailure -RunPath $runFile -RunState $run -VMRecord $vmRecord -VMName $vmName -Action $Action -Exception $_.Exception -RebootBarrier ([ref]$rebootBarrier)
-                }
+            foreach ($vmRecord in $started) {
+                $result = & $invokeVm $vmRecord $false
+                $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result $result -RebootBarrier ([ref]$rebootBarrier)
             }
         }
 
