@@ -150,7 +150,12 @@ function Write-PatchTextAtomic {
     $encoding = New-Object System.Text.UTF8Encoding($false)
     try {
         [System.IO.File]::WriteAllText($temporaryPath, $Text, $encoding)
-        Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
+        # The window reads run.json every 500 ms during an action; while it has the file open the
+        # replace fails with an IOException, so it is retried for up to about two seconds.
+        for ($attempt = 1; ; $attempt++) {
+            try { Move-Item -LiteralPath $temporaryPath -Destination $Path -Force -ErrorAction Stop; break }
+            catch [System.IO.IOException] { if ($attempt -ge 20) { throw }; Start-Sleep -Milliseconds 100 }
+        }
     }
     finally {
         if (Test-Path -LiteralPath $temporaryPath) {
