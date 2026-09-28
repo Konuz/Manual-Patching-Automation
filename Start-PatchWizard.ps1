@@ -205,7 +205,7 @@ function New-WizardRun {
         $script:Wizard.GuestCredentials = @{}
         $script:Wizard.Controls.OpenLogs.Enabled = $true
         $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}' -f $script:Wizard.RunPath)
-        Set-WizardStatus -Message ('Created run {0}.' -f [string](Get-PatchValue $script:Wizard.RunState @('runId') ''))
+        Set-WizardStatus -Message ('Run {0} has been created. Go to the Scan tab and start the scan.' -f [string](Get-PatchValue $script:Wizard.RunState @('runId') ''))
         Refresh-WizardVmGrid
         Refresh-WizardSelectionGrid
         Update-WizardStepState
@@ -349,9 +349,6 @@ function Refresh-WizardSelectionGrid {
             $type,
             $labelText)
         $grid.Rows[$index].Tag = $row
-    }
-    if ($script:Wizard.UpdateRows.Count -eq 0) {
-        Set-WizardStatus -Message 'No offered updates are available yet. Run Scan first.'
     }
 }
 
@@ -998,11 +995,6 @@ function Initialize-WizardUi {
 
     $vcLabel = New-WizardLabel -Text 'vCenter server(s)' -X 10 -Y 12
     $vcText = New-WizardTextBox -X 155 -Y 9 -Width 360
-    $vcButton = New-Object System.Windows.Forms.Button
-    $vcButton.Text = 'Get vCenter credential'
-    $vcButton.Location = New-Object System.Drawing.Point(530, 8)
-    $vcButton.Size = New-Object System.Drawing.Size(170, 27)
-    $vcButton.Add_Click({ Request-WizardCredential })
 
     $vmLabel = New-WizardLabel -Text 'VM entries' -X 10 -Y 48
     $vmHint = New-WizardLabel -Text 'One per line: VM name, FQDN, or VM name|FQDN. Guest credentials are asked per domain.' -X 155 -Y 48 -Width 710 -Height 22
@@ -1113,7 +1105,7 @@ function Initialize-WizardUi {
     $resume.Add_Click({ Resume-WizardRun })
     $runPathLabel = New-WizardLabel -Text 'No active run' -X 310 -Y 510 -Width 690 -Height 30
     $runPathLabel.ForeColor = [System.Drawing.Color]::DimGray
-    $settingsPanel.Controls.AddRange(@($vcLabel, $vcText, $vcButton, $vmLabel, $vmHint, $vmText, $loadFile, $outputLabel, $outputText, $browseOutput, $concurrencyLabel, $scanConcurrency, $installConcurrencyLabel, $installConcurrency, $rebootBatchLabel, $rebootBatch, $advancedToggle, $advancedPanel, $ignoreVc, $ignoreEsxi, $certificateHint, $newRun, $resume, $runPathLabel))
+    $settingsPanel.Controls.AddRange(@($vcLabel, $vcText, $vmLabel, $vmHint, $vmText, $loadFile, $outputLabel, $outputText, $browseOutput, $concurrencyLabel, $scanConcurrency, $installConcurrencyLabel, $installConcurrency, $rebootBatchLabel, $rebootBatch, $advancedToggle, $advancedPanel, $ignoreVc, $ignoreEsxi, $certificateHint, $newRun, $resume, $runPathLabel))
 
     $scanTab = New-Object System.Windows.Forms.TabPage
     $scanTab.Text = 'Scan'
@@ -1302,7 +1294,7 @@ function Initialize-WizardUi {
     # Fields that take up leftover space when the window is wider/taller than the zoom needs.
     $script:Wizard.Stretch = @{}
     foreach ($control in @($vcText, $vmHint, $vmText, $outputText, $certificateHint, $runPathLabel, $installHint, $rebootHint, $verifyHint, $progress)) { $script:Wizard.Stretch[$control] = 'Width' }
-    foreach ($control in @($vcButton, $loadFile, $browseOutput, $progressLabel)) { $script:Wizard.Stretch[$control] = 'Right' }
+    foreach ($control in @($loadFile, $browseOutput, $progressLabel)) { $script:Wizard.Stretch[$control] = 'Right' }
     $script:Wizard.Stretch[$statusText] = 'Both'
     $form.Add_Shown({
         $script:Wizard.BaseClientSize = $script:Wizard.Form.ClientSize
