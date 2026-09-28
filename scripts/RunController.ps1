@@ -678,6 +678,18 @@ function Wait-PatchAgent {
     return [pscustomobject]@{ status = 'NeedsReview'; agentStatus = $null; error = $message }
 }
 
+function Receive-PatchAgentLog {
+    # Copies the step's agent.log into the run folder. The final status stays authoritative when it cannot be copied.
+    param($Context, $RunState, $VMRecord, $Step, [string]$RunPath)
+    try {
+        $guestLogPath = Join-Path (Get-PatchGuestPaths -Context $Context -RunState $RunState -Step $Step).directory 'agent.log'
+        $localLogPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step).agentLog
+        Receive-GuestFile -Context $Context -GuestPath $guestLogPath -LocalPath $localLogPath -IgnoreEsxiCertificate:([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)) | Out-Null
+    }
+    catch {
+    }
+}
+
 function Invoke-PatchAgentStep {
     param(
         [string]$Action,
@@ -763,14 +775,7 @@ function Invoke-PatchAgentStep {
             $waitResult.error = 'The cluster state is unknown ({0}); install and reboot are blocked for this VM.' -f [string](Get-PatchValue $cluster @('reason') 'no reason reported')
         }
     }
-    try {
-        $guestLogPath = Join-Path (Get-PatchGuestPaths -Context $Context -RunState $RunState -Step $step).directory 'agent.log'
-        $agentLogLocalPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $step).agentLog
-        Receive-GuestFile -Context $Context -GuestPath $guestLogPath -LocalPath $agentLogLocalPath -IgnoreEsxiCertificate:([bool](Get-PatchOption $RunState @('ignoreEsxiCertificatesForFileTransfers') $false)) | Out-Null
-    }
-    catch {
-        # Terminal status remains authoritative if an agent log cannot be downloaded.
-    }
+    Receive-PatchAgentLog -Context $Context -RunState $RunState -VMRecord $VMRecord -Step $step -RunPath $RunPath
     Set-PatchValue -InputObject $step -Name 'status' -Value $waitResult.status
     Set-PatchValue -InputObject $step -Name 'agentStatus' -Value $waitResult.agentStatus
     Update-PatchVmFromAgentStatus -Action $Action -VMRecord $VMRecord -Status $waitResult.agentStatus
@@ -804,12 +809,14 @@ function Wait-PatchReboot {
             if ($null -ne $status) { Set-PatchValue -InputObject $Step -Name 'agentStatus' -Value $status }
             if ([string](Get-PatchValue $status @('status') '') -eq 'Failed') {
                 $result = [pscustomobject]@{ status = 'Failed'; step = $Step; agentStatus = $status; error = [string](Get-PatchValue $status @('error') 'The reboot command failed.') }
+                Receive-PatchAgentLog -Context $context -RunState $RunState -VMRecord $VMRecord -Step $Step -RunPath $RunPath
                 break
             }
             $bootTime = Read-GuestBootTime -Context $context -IgnoreEsxiCertificate $ignoreEsxi
             if ([datetime]::Parse($bootTime).ToUniversalTime() -gt $baseline) {
                 Set-PatchValue -InputObject $Step -Name 'confirmedBootTime' -Value $bootTime
                 $result = [pscustomobject]@{ status = 'Confirmed'; step = $Step; agentStatus = $status; error = $null }
+                Receive-PatchAgentLog -Context $context -RunState $RunState -VMRecord $VMRecord -Step $Step -RunPath $RunPath
                 break
             }
         }
