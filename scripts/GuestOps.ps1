@@ -197,11 +197,16 @@ function Invoke-PatchCurl {
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
-    $curl = Get-Command -Name 'curl.exe' -CommandType Application -ErrorAction Stop
-    $null = & $curl.Source @Arguments 2>$null
+    # The Windows curl.exe, not another curl found on PATH (e.g. Git for Windows ships one too).
+    $curl = Get-Command -Name (Join-Path $env:SystemRoot 'System32\curl.exe') -CommandType Application -ErrorAction Stop
+    # Windows PowerShell 5.1 turns redirected stderr of a native program into error records, which
+    # would stop here under ErrorActionPreference Stop before the exit code is checked.
+    $ErrorActionPreference = 'Continue'
+    $output = @(& $curl.Source @Arguments 2>&1)
     if ($LASTEXITCODE -ne 0) {
-        # Do not include the transfer URL: vSphere embeds a one-time token in it.
-        throw ('curl.exe failed with exit code {0}.' -f $LASTEXITCODE)
+        # Remove any URL from curl's message: vSphere embeds a one-time token in the transfer URL.
+        $details = (@($output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() }) -join ' ') -replace 'https?://\S+', '<transfer URL>'
+        throw ('curl.exe failed with exit code {0}. {1}' -f $LASTEXITCODE, $details).Trim()
     }
 }
 
