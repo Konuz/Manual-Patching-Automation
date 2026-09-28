@@ -112,5 +112,7 @@ Before production use:
 14. Enter one VM by its FQDN only and one VM whose name contains `[` or `]`; confirm both are found (PowerCLI `Get-VM -Name` is a wildcard filter; the name is escaped).
 15. Stop one vCenter (or block it) and confirm the message: an unreachable vCenter stops the lookup for the whole run, and a run's vCenter list cannot be changed, so a new run is needed.
 16. With VMs on two vCenters and a long install, confirm that the VMs of the second vCenter are still observed after the wait (its session is idle meanwhile; an expired session shows as NeedsReview "could not be observed" and approving the step again observes it).
+17. Reboot a domain VM and watch the confirmation: a guest login right after the restart (VMware Tools up, domain logon not yet) must not be reported as a rejected credential; if it is, note it for a fix.
+18. Approve a reboot on a VM that already has a restart scheduled or in progress: if `shutdown.exe` returns an error code while the guest restarts anyway, the step shows `Failed` and does not hold back the next batch.
 
 Do not use a production VM for the first pilot. Cluster members and VMs with an unknown cluster state remain blocked for install and reboot.
