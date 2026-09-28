@@ -849,7 +849,9 @@ function Wait-PatchReboot {
                 break
             }
             $bootTime = Read-GuestBootTime -Context $context -IgnoreEsxiCertificate $ignoreEsxi
-            if ([datetime]::Parse($bootTime).ToUniversalTime() -gt $baseline) {
+            # At least a minute newer: a guest clock correction can shift LastBootUpTime by seconds, which must not
+            # confirm a reboot that has not happened. A real reboot comes minutes after the baseline boot.
+            if ([datetime]::Parse($bootTime).ToUniversalTime() -gt $baseline.AddMinutes(1)) {
                 Set-PatchValue -InputObject $Step -Name 'confirmedBootTime' -Value $bootTime
                 $result = [pscustomobject]@{ status = 'Confirmed'; step = $Step; agentStatus = $status; error = $null }
                 Receive-PatchAgentLog -Context $context -RunState $RunState -VMRecord $VMRecord -Step $Step -RunPath $RunPath

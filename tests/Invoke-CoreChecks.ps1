@@ -76,7 +76,7 @@ function Invoke-PatchCurl {
 function Start-GuestAgent { param($Context, [string]$GuestAgentPath, [string]$Mode, [Guid]$RunId, [Guid]$StepId, [string]$SelectionPath) $script:AgentStarts++; 1000 }
 # The first read is the baseline before the reboot; later reads return a newer boot time.
 $script:BootReads = 0
-function Read-GuestBootTime { param($Context, [bool]$IgnoreEsxiCertificate) $script:BootReads++; [datetime]::UtcNow.AddMinutes($script:BootReads).ToString('o') }
+function Read-GuestBootTime { param($Context, [bool]$IgnoreEsxiCertificate) $script:BootReads++; [datetime]::UtcNow.AddMinutes(10 * $script:BootReads).ToString('o') }
 function Read-GuestStatus {
     param($Context, [Guid]$RunId, [Guid]$StepId, [string]$ExpectedMode, [string]$LocalPath, [bool]$IgnoreEsxiCertificate)
     [pscustomobject]@{
