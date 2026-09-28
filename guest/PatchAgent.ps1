@@ -277,8 +277,6 @@ function Invoke-Scan {
         $records += New-UpdateRecord -Update $search.updates.Item($i) -Index $i
     }
     $script:Status.updates = $records
-    $script:Status.availableUpdateCount = $records.Count
-    $script:Status.patchingBlocked = ($script:Status.cluster.membership -ne 'NotMember')
     $script:Status.outcome = 'ScanCompleted'
 }
 

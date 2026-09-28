@@ -269,7 +269,7 @@ function New-PatchRun {
             installedUpdates = @()
             skippedUpdates = @()
             pendingUpdates = @()
-            reboot = [ordered]@{ status = 'NotRequested'; required = $false; baselineBootTime = $null; requestEvidence = $null; confirmedBootTime = $null }
+            reboot = [ordered]@{ status = 'NotRequested'; required = $false; confirmedBootTime = $null }
             steps = @()
             agentStatus = $null
             errors = @()
@@ -297,14 +297,14 @@ function New-PatchRun {
         }
         currentRound = 1
         currentAction = $null
-        selectedUpdates = @()
         vms = @($vmRecords)
         errors = @()
         runPath = $runJsonPath
     }
 
     Write-PatchRun -RunPath $runJsonPath -RunState $state | Out-Null
-    return [pscustomobject]$state
+    # Read back, so a new run has the same shape as a resumed one.
+    return (Read-PatchRun -RunPath $runJsonPath)
 }
 
 function Write-PatchEvent {
@@ -460,8 +460,6 @@ function New-PatchStep {
         agentMode = $AgentMode
         round = $Round
         stepId = ([Guid]::NewGuid()).ToString('D')
-        intent = $Action
-        intentAt = Get-PatchUtcNow
         status = 'IntentPersisted'
         startAttempted = $false
         processId = $null
@@ -470,7 +468,6 @@ function New-PatchStep {
         finishedAt = $null
         baselineBootTime = $null
         confirmationDeadlineAt = $null
-        requestEvidence = $null
         agentStatus = $null
         error = $null
     }
@@ -989,7 +986,6 @@ function Resolve-PatchVms {
         if ($connection.Rejected.Count -gt 0) {
             return [pscustomobject]@{ status = 'Stopped'; action = 'Resolve'; rejectedVCenters = $connection.Rejected; error = ('The credential was rejected by: {0}' -f ($connection.Rejected -join ', ')) }
         }
-        $rebootBarrier = $false
         foreach ($vmRecord in @(Get-PatchArray $run.vms)) {
             if (-not [string]::IsNullOrWhiteSpace([string]$vmRecord.accountGroup) -or $vmRecord.status -eq 'SkippedGuestAccount') { continue }
             $found = @()
@@ -1004,7 +1000,7 @@ function Resolve-PatchVms {
                 continue
             }
             $message = if ($found.Count -gt 1) { 'The VM name was found on several vCenters: {0}.' -f (($found | ForEach-Object { $_.VCenter }) -join ', ') } else { $lastError }
-            [void](Add-PatchVmResult -RunPath $RunPath -RunState $run -VMRecord $vmRecord -Action 'Resolve' -Result ([pscustomobject]@{ status = 'Failed'; error = $message }) -RebootBarrier ([ref]$rebootBarrier))
+            [void](Add-PatchVmResult -RunPath $RunPath -RunState $run -VMRecord $vmRecord -Action 'Resolve' -Result ([pscustomobject]@{ status = 'Failed'; error = $message }))
         }
         Save-PatchDecision -RunPath $RunPath -RunState $run
         Write-PatchSummary -RunPath $RunPath -RunState $run

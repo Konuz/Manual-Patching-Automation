@@ -22,7 +22,6 @@ $script:Wizard = @{
     ActivePowerShell = $null
     ActiveAsyncResult = $null
     ActiveAction = $null
-    ActiveStartedAt = $null
     LastRunLog = ''
     LastRunReadError = ''
     UpdatingGrid = $false
@@ -140,7 +139,7 @@ function Save-WizardSelections {
         throw 'Create or resume a run before saving update selections.'
     }
 
-    $allSelected = @()
+    $savedCount = 0
     foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
         $vmName = [string](Get-PatchValue $vm @('vmName') '')
         $rows = @($script:Wizard.UpdateRows | Where-Object { $_.VmName -eq $vmName })
@@ -155,11 +154,6 @@ function Save-WizardSelections {
                     updateId = $id
                     revisionNumber = $revision
                 }
-                $allSelected += [pscustomobject][ordered]@{
-                    vmName = $vmName
-                    updateId = $id
-                    revisionNumber = $revision
-                }
                 Set-PatchValue -InputObject $record -Name 'selected' -Value $true
             }
             else {
@@ -167,12 +161,12 @@ function Save-WizardSelections {
             }
         }
         Set-PatchValue -InputObject $vm -Name 'selectedUpdates' -Value @($selected)
+        $savedCount += $selected.Count
         Set-PatchValue -InputObject $vm -Name 'selectionSaved' -Value $true
     }
 
-    Set-PatchValue -InputObject $script:Wizard.RunState -Name 'selectedUpdates' -Value @($allSelected)
     Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
-    Set-WizardStatus -Message ('Saved {0} exact update selections.' -f $allSelected.Count)
+    Set-WizardStatus -Message ('Saved {0} exact update selections.' -f $savedCount)
     Refresh-WizardSelectionGrid
 }
 
@@ -583,7 +577,7 @@ function Start-WizardAction {
         if ($credentialDecision -in @('Skip', 'Stop', 'Cancel')) { return }
         if ($Action -eq 'Install' -and -not $ApprovalAlreadyGiven) {
             Save-WizardSelections
-            $selectedCount = @($script:Wizard.RunState.selectedUpdates).Count
+            $selectedCount = @(Get-PatchArray $script:Wizard.RunState.vms | ForEach-Object { Get-PatchArray $_.selectedUpdates }).Count
             $installPrompt = if ($selectedCount -eq 0) { 'No updates are selected. Continue and mark all VM installations as skipped?' } else { 'Install {0} explicitly selected update entries? The agent will search again and install only matching UpdateID and RevisionNumber values.' -f $selectedCount }
             $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, $installPrompt, 'Approve installation', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
             if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
@@ -642,7 +636,6 @@ function Start-WizardWorker {
     $script:Wizard.ActivePowerShell = $powerShell
     $script:Wizard.ActiveAsyncResult = $powerShell.BeginInvoke()
     $script:Wizard.ActiveAction = $Action
-    $script:Wizard.ActiveStartedAt = Get-Date
     Set-WizardStatus -Message ('{0} is running in the background. The window remains responsive.' -f $Action)
     Update-WizardStepState
 }
@@ -756,7 +749,6 @@ function Start-WizardNewRound {
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         $round = [int](Get-PatchValue $script:Wizard.RunState @('currentRound') 1) + 1
         Set-PatchValue -InputObject $script:Wizard.RunState -Name 'currentRound' -Value $round
-        Set-PatchValue -InputObject $script:Wizard.RunState -Name 'selectedUpdates' -Value @()
         Set-PatchValue -InputObject $script:Wizard.RunState -Name 'currentAction' -Value $null
         foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
             Set-PatchValue -InputObject $vm -Name 'currentRound' -Value $round
@@ -764,7 +756,7 @@ function Start-WizardNewRound {
             Set-PatchValue -InputObject $vm -Name 'selectedUpdates' -Value @()
             Set-PatchValue -InputObject $vm -Name 'selectionSaved' -Value $false
             Set-PatchValue -InputObject $vm -Name 'pendingUpdates' -Value @()
-            Set-PatchValue -InputObject $vm -Name 'reboot' -Value ([pscustomobject]@{ status = 'NotRequested'; required = $false; baselineBootTime = $null; requestEvidence = $null; confirmedBootTime = $null })
+            Set-PatchValue -InputObject $vm -Name 'reboot' -Value ([pscustomobject]@{ status = 'NotRequested'; required = $false; confirmedBootTime = $null })
             # A skipped guest account stays skipped for the rest of the run.
             if ([string](Get-PatchValue $vm @('status') '') -ne 'SkippedGuestAccount') { Set-PatchValue -InputObject $vm -Name 'status' -Value 'Pending' }
             Set-PatchValue -InputObject $vm -Name 'currentAction' -Value $null
