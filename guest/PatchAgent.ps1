@@ -436,9 +436,17 @@ function Invoke-Reboot {
     Write-AgentLog -Message 'Reboot requested with shutdown.exe /r /t 0.'
 
     $process = Start-Process -FilePath 'shutdown.exe' -ArgumentList @('/r', '/t', '0') -Wait -PassThru -WindowStyle Hidden
+    # 1115 ERROR_SHUTDOWN_IN_PROGRESS, 1190 ERROR_SHUTDOWN_IS_SCHEDULED: the guest restarts anyway, so the step
+    # stays RebootRequested and the controller waits for a newer boot time (the next batch waits too).
+    if ($process.ExitCode -in @(1115, 1190)) {
+        $script:Status.outcome = 'RebootAlreadyPending'
+        Save-Status
+        Write-AgentLog -Message ('shutdown.exe returned {0}: a restart is already in progress or scheduled.' -f $process.ExitCode)
+        return
+    }
     if ($process.ExitCode -ne 0) {
         $script:Status.outcome = 'RebootCommandFailed'
-        throw 'shutdown.exe returned a nonzero exit code.'
+        throw ('shutdown.exe returned exit code {0}.' -f $process.ExitCode)
     }
 }
 
