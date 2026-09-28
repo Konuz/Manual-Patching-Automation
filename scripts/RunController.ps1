@@ -1167,11 +1167,23 @@ function Invoke-PatchAction {
             $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = $skip; error = $skipError }) -RebootBarrier ([ref]$rebootBarrier)
         }
 
+        # Reboots already sent but not confirmed are observed first, in batches of their own; until they are
+        # confirmed no new reboot is sent (plan: step 5), also when they are not part of this call (Retry).
+        $observed = @($toRun | Where-Object { $Action -eq 'Reboot' -and (Test-PatchStepStarted -VMRecord $_ -Action 'Reboot') })
+        $fresh = @($toRun | Where-Object { $observed -notcontains $_ })
+        $runNames = @($toRun | ForEach-Object { [string]$_.vmName })
+        if ($Action -eq 'Reboot' -and @(Get-PatchArray $run.vms | Where-Object { $runNames -notcontains [string]$_.vmName -and (Test-PatchStepStarted -VMRecord $_ -Action 'Reboot') }).Count -gt 0) {
+            $rebootBarrier = $true
+        }
         $batchSize = [Math]::Max(1, $workLimit)
-        for ($batchStart = 0; $batchStart -lt $toRun.Count; $batchStart += $batchSize) {
+        $batches = New-Object System.Collections.ArrayList
+        foreach ($group in @(, $observed) + @(, $fresh)) {
+            for ($index = 0; $index -lt $group.Count; $index += $batchSize) { [void]$batches.Add(@($group[$index..([Math]::Min($group.Count, $index + $batchSize) - 1)])) }
+        }
+        foreach ($batch in $batches) {
             # Start every VM of the batch, then wait for each; at most workLimit agents run at once.
             $started = @()
-            foreach ($vmRecord in @($toRun[$batchStart..([Math]::Min($toRun.Count, $batchStart + $batchSize) - 1)])) {
+            foreach ($vmRecord in $batch) {
                 if ($Action -eq 'Reboot' -and $rebootBarrier) {
                     $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = 'PendingRebootBarrier'; error = $null }) -RebootBarrier ([ref]$rebootBarrier)
                     continue
