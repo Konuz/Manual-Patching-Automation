@@ -205,7 +205,7 @@ function New-WizardRun {
         $script:Wizard.VCenterCredentials = @{}
         $script:Wizard.GuestCredentials = @{}
         $script:Wizard.Controls.OpenLogs.Enabled = $true
-        $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}' -f $script:Wizard.RunPath)
+        $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}{1}The run keeps the settings it was created with; edited fields apply only to a New patch run.' -f $script:Wizard.RunPath, [Environment]::NewLine)
         Set-WizardStatus -Message ('Run {0} has been created. Go to the Scan tab and start the scan.' -f [string](Get-PatchValue $script:Wizard.RunState @('runId') ''))
         Refresh-WizardVmGrid
         Refresh-WizardSelectionGrid
@@ -264,7 +264,7 @@ function Resume-WizardRun {
         $script:Wizard.GuestCredentials = @{}
         Set-WizardSettingsFromRun -RunState $state
         $script:Wizard.Controls.OpenLogs.Enabled = $true
-        $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}' -f $script:Wizard.RunPath)
+        $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}{1}The run keeps the settings it was created with; edited fields apply only to a New patch run.' -f $script:Wizard.RunPath, [Environment]::NewLine)
         Refresh-WizardVmGrid
         Refresh-WizardSelectionGrid
         Update-WizardStepState
@@ -1117,7 +1117,7 @@ function Initialize-WizardUi {
     $resume.Location = New-Object System.Drawing.Point(155, 505)
     $resume.Size = New-Object System.Drawing.Size(135, 32)
     $resume.Add_Click({ Resume-WizardRun })
-    $runPathLabel = New-WizardLabel -Text 'No active run' -X 310 -Y 510 -Width 690 -Height 30
+    $runPathLabel = New-WizardLabel -Text 'No active run' -X 310 -Y 505 -Width 690 -Height 44
     $runPathLabel.ForeColor = [System.Drawing.Color]::DimGray
     $settingsPanel.Controls.AddRange(@($vcLabel, $vcText, $vmLabel, $vmHint, $vmText, $loadFile, $outputLabel, $outputText, $browseOutput, $concurrencyLabel, $scanConcurrency, $installConcurrencyLabel, $installConcurrency, $rebootBatchLabel, $rebootBatch, $advancedToggle, $advancedPanel, $ignoreVc, $ignoreEsxi, $certificateHint, $newRun, $resume, $runPathLabel))
 
