@@ -623,6 +623,18 @@ function Update-PatchVmFromAgentStatus {
     }
 }
 
+function Get-PatchWaitDeadline {
+    # A step's limit counts from its start (agent started or reboot sent). Only a step whose limit had already
+    # passed when the operator approved this step (or resumed the run) gets one more full limit, counted from that
+    # approval: waiting for one VM of a batch never extends the limit of the others.
+    param($RunState, $Step, [int]$TimeoutMinutes)
+    $startedAt = [datetime]::Parse([string](Get-PatchValue $Step @('startedAt') (Get-PatchUtcNow))).ToUniversalTime()
+    $approvedAt = [datetime]::Parse([string](Get-PatchValue $RunState @('actionStartedAt') (Get-PatchUtcNow))).ToUniversalTime()
+    $deadline = $startedAt.AddMinutes($TimeoutMinutes)
+    if ($deadline -lt $approvedAt) { $deadline = $approvedAt.AddMinutes($TimeoutMinutes) }
+    return $deadline
+}
+
 function Wait-PatchAgent {
     # Waits for the agent's final status.json. Read-GuestStatus accepts a final status only when its
     # runId, stepId and mode match this step and finishedAt is set; a missing process alone is not enough.
@@ -631,10 +643,7 @@ function Wait-PatchAgent {
     $mode = [string]$Step.agentMode
     $localStatusPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step).status
     $ignoreEsxi = Test-PatchIgnoreEsxi $RunState
-    # The limit counts from the agent's start; observing it again after the limit (approving the step again,
-    # Resume run) waits one more full limit.
-    $deadline = [datetime]::Parse([string](Get-PatchValue $Step @('startedAt') (Get-PatchUtcNow))).ToUniversalTime().AddMinutes($TimeoutMinutes)
-    if ($deadline -lt (Get-Date).ToUniversalTime()) { $deadline = (Get-Date).ToUniversalTime().AddMinutes($TimeoutMinutes) }
+    $deadline = Get-PatchWaitDeadline -RunState $RunState -Step $Step -TimeoutMinutes $TimeoutMinutes
 
     $lastError = $null
     $agentEnded = $false
@@ -793,9 +802,9 @@ function Wait-PatchReboot {
     $baseline = [datetime]::Parse([string]$Step.baselineBootTime).ToUniversalTime()
     $ignoreEsxi = Test-PatchIgnoreEsxi $RunState
     $localStatusPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step).status
-    # Every observation waits the full limit: approving Reboot again for an unconfirmed reboot (e.g. a long
-    # cumulative update) only waits again for a newer boot time; the reboot itself is never sent twice.
-    $deadline = (Get-Date).ToUniversalTime().AddMinutes($TimeoutMinutes)
+    # Approving Reboot again for an unconfirmed reboot (e.g. a long cumulative update) waits one more full limit
+    # for a newer boot time; the reboot itself is never sent twice.
+    $deadline = Get-PatchWaitDeadline -RunState $RunState -Step $Step -TimeoutMinutes $TimeoutMinutes
 
     $lastError = $null
     while ($true) {
@@ -1063,6 +1072,8 @@ function Invoke-PatchAction {
         $runFile = Get-PatchRunJsonPath -RunPath $RunPath
         Write-PatchEvent -RunPath $runFile -Message ('{0} started.' -f $Action) -Step $Action
         Set-PatchValue -InputObject $run -Name 'status' -Value 'Running'
+        # The moment of the operator's approval (or Resume run): see Get-PatchWaitDeadline.
+        Set-PatchValue -InputObject $run -Name 'actionStartedAt' -Value (Get-PatchUtcNow)
         Set-PatchValue -InputObject $run -Name 'currentAction' -Value $Action
         $vmRecords = @(Get-PatchArray $run.vms | Where-Object { $VmNames.Count -eq 0 -or $_.vmName -in $VmNames })
         foreach ($vmRecord in $vmRecords) {
