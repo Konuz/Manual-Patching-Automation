@@ -1163,6 +1163,12 @@ function Invoke-PatchAction {
                 if ($membership -ne 'Member') { $skipError = ('{0} is blocked because the cluster membership is {1}.' -f $Action, $membership) }
             }
             elseif ($ObserveOnly -and $Action -in @('Install', 'Reboot') -and -not (Test-PatchStepStarted -VMRecord $vmRecord -Action $Action)) { $skip = 'SkippedNotStarted' }
+            elseif ($Action -in @('Install', 'Reboot') -and -not (Test-PatchStepStarted -VMRecord $vmRecord -Action $Action) -and
+                $null -ne ($blocker = Get-PatchMutatingStepBlocker -RunState $run -VMRecord $vmRecord -CurrentStep $null)) {
+                # Plan: an unclear result needs manual reconciliation before the next install or reboot of this VM.
+                $skip = 'SkippedUnreviewedStep'
+                $skipError = 'The {0} step of round {1} has no final result. Check the guest and use Mark steps reviewed.' -f $blocker.action, $blocker.round
+            }
             if ($null -eq $skip) { $toRun += $vmRecord; continue }
             $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = $skip; error = $skipError }) -RebootBarrier ([ref]$rebootBarrier)
         }
@@ -1205,7 +1211,7 @@ function Invoke-PatchAction {
             }
         }
 
-        $needsReview = @($resultRows | Where-Object { $_.status -eq 'NeedsReview' -or $_.status -eq 'PendingRebootConfirmation' -or $_.status -eq 'PendingRebootBarrier' }).Count -gt 0
+        $needsReview = @($resultRows | Where-Object { $_.status -in @('NeedsReview', 'PendingRebootConfirmation', 'PendingRebootBarrier', 'SkippedUnreviewedStep') }).Count -gt 0
         $hasErrors = @($resultRows | Where-Object { $_.status -in @('Failed', 'CompletedWithErrors', 'GuestCredentialRejected') -or -not [string]::IsNullOrWhiteSpace([string]$_.error) }).Count -gt 0
         if ($needsReview) { Set-PatchValue -InputObject $run -Name 'status' -Value 'NeedsReview' }
         elseif ($hasErrors) { Set-PatchValue -InputObject $run -Name 'status' -Value 'CompletedWithErrors' }
