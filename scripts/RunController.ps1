@@ -1127,8 +1127,12 @@ function Invoke-PatchAction {
             catch {
                 # Get-GuestContext raises InvalidCredentialException when the guest rejects the account;
                 # the GUI then offers Retry, Skip or Stop (plan: step 1).
-                $code = if ($_.Exception -is [System.Security.Authentication.InvalidCredentialException]) { 'GuestCredentialRejected' } else { 'Failed' }
-                [pscustomobject]@{ status = $code; error = $_.Exception.Message }
+                # While waiting for a started agent or reboot, a lost contact leaves the step running; approving the
+                # step again observes it (NeedsReview, not Failed).
+                if ($_.Exception -is [System.Security.Authentication.InvalidCredentialException]) { $code = 'GuestCredentialRejected'; $message = $_.Exception.Message }
+                elseif (-not $StartOnly) { $code = 'NeedsReview'; $message = 'The started {0} could not be observed: {1}' -f $Action, $_.Exception.Message }
+                else { $code = 'Failed'; $message = $_.Exception.Message }
+                [pscustomobject]@{ status = $code; error = $message }
             }
         }
 
