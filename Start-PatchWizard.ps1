@@ -716,6 +716,7 @@ function Complete-WizardAction {
             })
             $resultSummary = '{0} finished: {1}.' -f $action, $(if ($groups.Count -gt 0) { $groups -join '; ' } else { $resultStatus })
             if ($resultStatus -ne 'Completed') { $resultSummary += ' Details for each VM are in errors.log.' }
+            if (@(Get-PatchArray (Get-PatchValue $result @('vmResults') @()) | Where-Object { $_.status -eq 'SkippedInstalledThisRound' }).Count -gt 0) { $resultSummary += ' Install runs once per round: for updates found later, use Start another round on the Verify tab.' }
             if ($script:Wizard.ObserveOnly -and $action -in @('Install', 'Reboot')) { $resultSummary += (' VMs not started before the interruption (SkippedNotStarted) need a new {0} approval.' -f $action) }
         }
     }

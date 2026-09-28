@@ -555,15 +555,30 @@ function Get-PatchGuestPaths {
     }
 }
 
+function Get-PatchLatestStep {
+    # The latest step of this action in the VM's current round, or $null.
+    param($VMRecord, [string]$Action)
+    $round = [int]$VMRecord.currentRound
+    $steps = @(Get-PatchArray $VMRecord.steps | Where-Object { [string]$_.action -eq $Action -and [int]$_.round -eq $round })
+    if ($steps.Count -eq 0) { return $null }
+    return $steps[-1]
+}
+
 function Test-PatchStepStarted {
     # True when the latest step of this action in the VM's current round was started and, for a reboot,
     # is not settled yet. A settled reboot followed by a new pending reboot needs a new step and approval.
     param($VMRecord, [string]$Action)
-    $round = [int]$VMRecord.currentRound
-    $steps = @(Get-PatchArray $VMRecord.steps | Where-Object { [string](Get-PatchValue $_ @('action') '') -eq $Action -and [int](Get-PatchValue $_ @('round') 0) -eq $round })
-    if ($steps.Count -eq 0 -or -not [bool](Get-PatchValue $steps[-1] @('startAttempted') $false)) { return $false }
-    if ($Action -eq 'Reboot') { return (-not (Test-PatchMutatingStepReconciled -Step $steps[-1])) }
+    $step = Get-PatchLatestStep -VMRecord $VMRecord -Action $Action
+    if ($null -eq $step -or -not [bool]$step.startAttempted) { return $false }
+    if ($Action -eq 'Reboot') { return (-not (Test-PatchMutatingStepReconciled -Step $step)) }
     return $true
+}
+
+function Test-PatchInstallDone {
+    # Plan: one installation per round; updates found later (e.g. by Verify) need a new round and selection.
+    param($VMRecord)
+    $step = Get-PatchLatestStep -VMRecord $VMRecord -Action 'Install'
+    return ($null -ne $step -and [string]$step.status -in @('Completed', 'CompletedWithErrors', 'Failed', 'Reviewed'))
 }
 
 function Get-PatchClusterMembership {
@@ -1116,6 +1131,7 @@ function Invoke-PatchAction {
                 if ($Action -eq 'Reboot' -and $rebootBarrier) { $skip = 'PendingRebootBarrier' }
                 elseif ($vmRecord.status -eq 'SkippedGuestAccount') { $skip = 'SkippedGuestAccount' }
                 elseif ($Action -eq 'Install' -and @(Get-PatchArray $vmRecord.selectedUpdates).Count -eq 0) { $skip = 'SkippedNoSelection' }
+                elseif ($Action -eq 'Install' -and (Test-PatchInstallDone -VMRecord $vmRecord)) { $skip = 'SkippedInstalledThisRound' }
                 elseif ($Action -eq 'Reboot' -and -not (Test-PatchVmRequiresReboot -VMRecord $vmRecord)) { $skip = 'SkippedNoReboot' }
                 elseif ($Action -in @('Install', 'Reboot') -and $membership -ne 'NotMember') {
                     # Plan: a configured cluster node is excluded; an unrecognised state blocks the VM and is an error.
