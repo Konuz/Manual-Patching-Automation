@@ -431,6 +431,9 @@ function Update-WizardStepState {
     $unresolvedMutatingStep = Get-WizardUnresolvedMutatingStep
     $script:Wizard.Controls.StartRoundButton.Enabled = (-not $active -and $null -eq $unresolvedMutatingStep -and ($state -match '(?i)completed|needsreview|stopped'))
     $script:Wizard.Controls.FinishButton.Enabled = (-not $active)
+    # Mark steps reviewed and New patch run write run.json, which only the running action may change.
+    $script:Wizard.Controls.ReviewButton.Enabled = (-not $active)
+    $script:Wizard.Controls.NewRunButton.Enabled = (-not $active)
     Refresh-WizardRebootGrid
 }
 
@@ -1296,6 +1299,8 @@ function Initialize-WizardUi {
         VerifyButton = $verifyButton
         StartRoundButton = $roundButton
         FinishButton = $finishButton
+        ReviewButton = $reviewButton
+        NewRunButton = $newRun
         StatusLabel = $statusLabel
         ProgressLabel = $progressLabel
         ProgressBar = $progress
