@@ -19,6 +19,7 @@ $script:Wizard = @{
     GuestCredentials = @{}
     PendingAction = $null
     ObserveOnly = $false
+    RetryVms = @()
     ActivePowerShell = $null
     ActiveAsyncResult = $null
     ActiveAction = $null
@@ -570,7 +571,7 @@ function Start-WizardAction {
     )
 
     if ($ObserveOnly) { $script:Wizard.ObserveOnly = $true }
-    elseif (-not $ApprovalAlreadyGiven) { $script:Wizard.ObserveOnly = $false }
+    elseif (-not $ApprovalAlreadyGiven) { $script:Wizard.ObserveOnly = $false; $script:Wizard.RetryVms = @() }
     try {
         if ($null -ne $script:Wizard.ActivePowerShell) { throw 'An action is already running.' }
         if ($null -eq $script:Wizard.RunState -or [string]::IsNullOrWhiteSpace([string]$script:Wizard.RunPath)) { throw 'Create or resume a run first.' }
@@ -624,11 +625,11 @@ function Start-WizardWorker {
     param([Parameter(Mandatory = $true)][string]$Action)
 
     $workerScript = {
-        param($ControllerPath, $ActionName, $RunFilePath, $VCenterCredentials, $GuestCredentials, $ObserveOnly)
+        param($ControllerPath, $ActionName, $RunFilePath, $VCenterCredentials, $GuestCredentials, $ObserveOnly, $VmNames)
         try {
             . $ControllerPath
             if ($ActionName -eq 'Resolve') { return (Resolve-PatchVms -RunPath $RunFilePath -VCenterCredentials $VCenterCredentials) }
-            return (Invoke-PatchAction -Action $ActionName -RunPath $RunFilePath -VCenterCredentials $VCenterCredentials -GuestCredentials $GuestCredentials -ObserveOnly:$ObserveOnly)
+            return (Invoke-PatchAction -Action $ActionName -RunPath $RunFilePath -VCenterCredentials $VCenterCredentials -GuestCredentials $GuestCredentials -ObserveOnly:$ObserveOnly -VmNames $VmNames)
         }
         catch {
             return [pscustomobject]@{ status = 'Stopped'; action = $ActionName; error = $_.Exception.Message }
@@ -642,6 +643,7 @@ function Start-WizardWorker {
     [void]$powerShell.AddArgument($script:Wizard.VCenterCredentials)
     [void]$powerShell.AddArgument($script:Wizard.GuestCredentials)
     [void]$powerShell.AddArgument([bool]$script:Wizard.ObserveOnly)
+    [void]$powerShell.AddArgument([string[]]@($script:Wizard.RetryVms))
     $script:Wizard.ActivePowerShell = $powerShell
     $script:Wizard.ActiveAsyncResult = $powerShell.BeginInvoke()
     $script:Wizard.ActiveAction = $Action
@@ -710,8 +712,11 @@ function Complete-WizardAction {
     $resultSummary = $null
     if ($null -ne $result) {
         $resultStatus = [string](Get-PatchValue $result @('status') 'Unknown')
+        $rejectedNames = @(Get-PatchArray $script:Wizard.RunState.vms | Where-Object { $_.status -eq 'GuestCredentialRejected' } | ForEach-Object { [string]$_.vmName })
         $credentialDecision = Resolve-WizardCredentialRejection -Action $action
         if ($credentialDecision -eq 'Retry') {
+            # The same step again, only for the VMs whose credential was rejected; the others keep their results.
+            $script:Wizard.RetryVms = $rejectedNames
             Start-WizardAction -Action $action -ApprovalAlreadyGiven
             return
         }
@@ -728,6 +733,7 @@ function Complete-WizardAction {
         }
     }
     $script:Wizard.ObserveOnly = $false
+    $script:Wizard.RetryVms = @()
 
     Refresh-WizardVmGrid
     Refresh-WizardSelectionGrid

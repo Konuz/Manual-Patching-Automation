@@ -1078,7 +1078,9 @@ function Invoke-PatchAction {
         # Guest credentials by credential group (see Get-PatchAccountGroup); kept in memory only.
         [Parameter(Mandatory = $true)][hashtable]$GuestCredentials,
         # Resume run: observe the installs and reboots already started; start no new ones (plan: Resume run).
-        [switch]$ObserveOnly
+        [switch]$ObserveOnly,
+        # Retry after a rejected guest credential: only these VMs; the others keep their results.
+        [string[]]$VmNames = @()
     )
 
     foreach ($credential in @($VCenterCredentials.Values) + @($GuestCredentials.Values)) { Register-PatchCredential -Credential $credential }
@@ -1091,7 +1093,7 @@ function Invoke-PatchAction {
         Write-PatchEvent -RunPath $runFile -Message ('{0} started.' -f $Action) -Step $Action
         Set-PatchValue -InputObject $run -Name 'status' -Value 'Running'
         Set-PatchValue -InputObject $run -Name 'currentAction' -Value $Action
-        $vmRecords = @(Get-PatchArray $run.vms)
+        $vmRecords = @(Get-PatchArray $run.vms | Where-Object { $VmNames.Count -eq 0 -or $_.vmName -in $VmNames })
         foreach ($vmRecord in $vmRecords) {
             Set-PatchValue -InputObject $vmRecord -Name 'currentAction' -Value $null
             Set-PatchValue -InputObject $vmRecord -Name 'lastProcessedAction' -Value $null
