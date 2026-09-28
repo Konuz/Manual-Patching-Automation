@@ -273,7 +273,6 @@ function New-PatchRun {
             steps = @()
             agentStatus = $null
             errors = @()
-            errorLinks = @()
         }
     }
 
@@ -301,7 +300,6 @@ function New-PatchRun {
         selectedUpdates = @()
         vms = @($vmRecords)
         errors = @()
-        errorLinks = @()
         runPath = $runJsonPath
     }
 
@@ -380,8 +378,8 @@ function Write-PatchSummary {
     [void]$markdown.AppendLine(('* Ignore ESXi certificates for file transfers: `{0}`' -f $ignoreEsxi))
     [void]$markdown.AppendLine(('* Limits (minutes): scan `{0}`, install `{1}`, reboot confirmation `{2}`' -f [string](Get-PatchValue $limits @('scanTimeoutMinutes') 30), [string](Get-PatchValue $limits @('installTimeoutMinutes') 180), [string](Get-PatchValue $limits @('rebootConfirmationTimeoutMinutes') 30)))
     [void]$markdown.AppendLine('')
-    [void]$markdown.AppendLine('| VM | Expected FQDN | Status | Installed | Skipped | Pending | Reboot | Certificate choices | Errors |')
-    [void]$markdown.AppendLine('| --- | --- | --- | --- | --- | --- | --- | --- | --- |')
+    [void]$markdown.AppendLine('| VM | Expected FQDN | Status | Installed | Skipped | Pending | Reboot | Errors |')
+    [void]$markdown.AppendLine('| --- | --- | --- | --- | --- | --- | --- | --- |')
 
     foreach ($vm in @(Get-PatchArray -Value (Get-PatchValue $RunState @('vms') @()))) {
         $name = [string](Get-PatchValue $vm @('vmName') '')
@@ -394,12 +392,26 @@ function Write-PatchSummary {
         $rebootStatus = [string](Get-PatchValue $reboot @('status') 'NotRequested')
         $vmErrors = @(Get-PatchArray -Value (Get-PatchValue $vm @('errors') @()))
         $errorLink = '[errors.log](errors.log)'
-        $installedText = (@($installed | ForEach-Object { [string](Get-PatchValue $_ @('updateId', 'title') $_) }) -join ', ')
-        $skippedText = (@($skipped | ForEach-Object { [string](Get-PatchValue $_ @('updateId', 'reason') $_) }) -join ', ')
-        $pendingText = (@($pending | ForEach-Object { [string](Get-PatchValue $_ @('updateId', 'title') $_) }) -join ', ')
+        # Updates are listed by title (e.g. "... KB5034439 ..."); a skipped selection has no title of its own.
+        $titles = @{}
+        foreach ($update in @(Get-PatchArray (Get-PatchValue $vm @('availableUpdates') @())) + $installed + $pending) {
+            $id = [string](Get-PatchValue $update @('updateId') '')
+            $title = [string](Get-PatchValue $update @('title') '')
+            if ($id -and $title) { $titles[$id.ToLowerInvariant()] = $title }
+        }
+        $describe = {
+            param($Update)
+            $id = [string](Get-PatchValue $Update @('updateId') '')
+            $title = [string](Get-PatchValue $Update @('title') '')
+            if (-not $title -and $titles.ContainsKey($id.ToLowerInvariant())) { $title = $titles[$id.ToLowerInvariant()] }
+            if ($title) { $title } else { '{0} rev {1}' -f $id, [string](Get-PatchValue $Update @('revisionNumber') '') }
+        }
+        $installedText = (@($installed | ForEach-Object { & $describe $_ }) -join '; ')
+        $skippedText = (@($skipped | ForEach-Object { '{0} ({1})' -f (& $describe $_), [string](Get-PatchValue $_ @('reason') '') }) -join '; ')
+        $pendingText = (@($pending | ForEach-Object { & $describe $_ }) -join '; ')
         $escape = { param([string]$Value) ([string]$Value).Replace('|', '\|').Replace("`r", ' ').Replace("`n", ' ') }
-        $rowValues = @((& $escape $name), (& $escape $fqdn), (& $escape $status), (& $escape $installedText), (& $escape $skippedText), (& $escape $pendingText), (& $escape $rebootStatus), [string]$ignoreVc, [string]$ignoreEsxi, $errorLink, [string]$vmErrors.Count)
-        [void]$markdown.AppendLine(('| {0} | {1} | {2} | {3} | {4} | {5} | {6} | vCenter={7}; ESXi={8} | {9} ({10}) |' -f $rowValues))
+        $rowValues = @((& $escape $name), (& $escape $fqdn), (& $escape $status), (& $escape $installedText), (& $escape $skippedText), (& $escape $pendingText), (& $escape $rebootStatus), $errorLink, [string]$vmErrors.Count)
+        [void]$markdown.AppendLine(('| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} ({8}) |' -f $rowValues))
         $vmRows += [pscustomobject]@{
             RunId = [string](Get-PatchValue $RunState @('runId') '')
             VMName = $name
@@ -891,9 +903,21 @@ function Add-PatchVmResult {
     if (-not [string]::IsNullOrWhiteSpace($message)) {
         $message = Protect-PatchText $message
         $level = 'ERROR'
-        Set-PatchValue -InputObject $VMRecord -Name 'errors' -Value @(@(Get-PatchArray $VMRecord.errors) + [pscustomobject]@{ code = $status; message = $message; step = $Action })
-        Set-PatchValue -InputObject $VMRecord -Name 'errorLinks' -Value @('errors.log')
-        $errorRecord = Write-PatchError -RunPath $RunPath -Message $message -VMName $vmName -Step $Action -Code $status
+        # The agent's outcome (e.g. SearchFailed, InstallFailed) is the more specific error code.
+        $outcome = [string](Get-PatchValue $agentStatus @('outcome') '')
+        $code = if ($outcome) { $outcome } else { $status }
+        $hResult = $null
+        foreach ($name in @('installResult', 'downloadResult', 'searchResult')) {
+            if ($null -eq $hResult) { $hResult = Get-PatchValue (Get-PatchValue $agentStatus @($name) $null) @('hResult') $null }
+        }
+        $context = [ordered]@{
+            status = $status
+            round = [int](Get-PatchValue $VMRecord @('currentRound') 1)
+            stepId = [string](Get-PatchValue (Get-PatchValue $Result @('step') $null) @('stepId') '')
+            hResult = $hResult
+        }
+        Set-PatchValue -InputObject $VMRecord -Name 'errors' -Value @(@(Get-PatchArray $VMRecord.errors) + [pscustomobject]@{ code = $code; message = $message; step = $Action })
+        $errorRecord = Write-PatchError -RunPath $RunPath -Message $message -VMName $vmName -Step $Action -Code $code -Context $context
         Set-PatchValue -InputObject $RunState -Name 'errors' -Value @(@(Get-PatchArray $RunState.errors) + $errorRecord)
     }
     Save-PatchDecision -RunPath $RunPath -RunState $RunState
