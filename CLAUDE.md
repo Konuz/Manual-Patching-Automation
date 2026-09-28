@@ -57,4 +57,5 @@ Key design points that span files:
 
 - The controller sets `Set-StrictMode -Version 2.0`, which also applies to the dot-sourced launcher and tests: `.Count` on a single object throws – wrap results in `@(...)`.
 - Test doubles are functions defined after dot-sourcing the controller. PowerShell scoping is dynamic, so a double must use `$script:` variables, not names that callers also use as locals (e.g. `$context`).
+- `Invoke-PatchCurl` uses `%SystemRoot%\System32\curl.exe` (Git for Windows puts a second curl on PATH) and sets `ErrorActionPreference = 'Continue'` locally: in PS 5.1 redirected stderr of a native program is a terminating error under `Stop`.
 - Nothing touching vSphere can be verified offline; behaviour that depends on a real vCenter/ESXi belongs in the pilot described in `README.md`.

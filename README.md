@@ -14,7 +14,7 @@ Set-Location '<repository folder>'
 The workstation needs:
 
 - VMware PowerCLI, including `VMware.VimAutomation.Core`, importable in Windows PowerShell 5.1.
-- The Windows `curl.exe` client for ESXi Guest Operations file transfers.
+- The Windows `curl.exe` client (`%SystemRoot%\System32\curl.exe`) for ESXi Guest Operations file transfers; another curl on PATH is not used.
 - VMware Tools running in every target VM.
 - vCenter and guest credentials with the permissions required for inventory, Guest Operations, file transfer, process start, and the requested update actions.
 
@@ -103,5 +103,7 @@ Before production use:
 7. Enter a wrong guest password once and confirm that the Retry / Skip these VMs / Stop dialog appears.
 8. With two vCenters, confirm that each VM shows the vCenter it was found on (in `summary.csv`) and that a vCenter with a different password asks for its own credential.
 9. With a list that mixes domain VMs and a DMZ VM, confirm the **Account group** column and that one credential is asked per domain and one for the DMZ VM.
+10. Confirm that the guest account runs the agent with full administrator rights through Guest Operations: the first Install must report per-update results, not an access-denied error. With UAC, a local administrator other than the built-in Administrator may get a restricted token (not verified yet).
+11. With **Ignore ESXi certificates for file transfers** unchecked, confirm that file transfers work. The Windows `curl.exe` also checks certificate revocation, which may fail for internal ESXi/VMCA certificates (curl exit code 35 in `errors.log`; not verified yet).
 
 Do not use a production VM for the first pilot. Cluster members and VMs with an unknown cluster state remain blocked for install and reboot.
