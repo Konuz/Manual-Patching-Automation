@@ -611,8 +611,12 @@ function Start-WizardAction {
             Refresh-WizardRebootGrid
             $pending = @(Get-WizardPendingRebootVms)
             if ($pending.Count -eq 0) { throw 'No VM currently has a pending reboot.' }
-            $names = @($pending | ForEach-Object { [string](Get-PatchValue $_ @('vmName') '') })
-            $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, ('Approve reboot for pending VM(s): {0}' -f ($names -join ', ')), 'Approve reboot', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            # A reboot already sent and not confirmed yet is only observed again, never sent twice.
+            $lines = @($pending | ForEach-Object {
+                    if (Test-PatchStepStarted -VMRecord $_ -Action 'Reboot') { '{0}: observe the reboot already sent (it is not sent again)' -f $_.vmName }
+                    else { '{0}: reboot now' -f $_.vmName }
+                })
+            $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, ('Approve the reboot step for these VMs? The next batch starts only after the previous one reports a newer boot time.{0}{0}{1}' -f [Environment]::NewLine, ($lines -join [Environment]::NewLine)), 'Approve reboot', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
             if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         }
 
