@@ -78,7 +78,7 @@ Enabling one option does not enable the other. Ignoring a certificate means the 
 
 Each run is stored under `runs/<runId>/` (or the output folder selected in Settings). A new run starts with `run.json`. During actions, `run.log` is appended, `errors.log` is created when an error is recorded, per-VM status and agent log files appear when an agent step runs, and `summary.md` and `summary.csv` are created or refreshed whenever the controller writes a summary. A skipped VM or a newly created run therefore may not have every file. Use **Open logs** in the wizard or open the run folder directly.
 
-Use **Resume run** to continue an interrupted run. Credentials are requested again and kept in memory only; passwords, secure strings, and credential objects are excluded from `run.json`, logs, and summaries.
+Use **Resume run** to continue an interrupted run. If an action was interrupted, the wizard observes the installs and reboots it had already started; VMs it had not started yet are shown as `SkippedNotStarted` and need a new approval of that step. Credentials are requested again and kept in memory only; passwords, secure strings, and credential objects are excluded from `run.json`, logs, and summaries.
 
 ## Offline verification
 

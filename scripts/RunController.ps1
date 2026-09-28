@@ -539,6 +539,15 @@ function Get-PatchGuestPaths {
     }
 }
 
+function Test-PatchStepStarted {
+    # True when the latest step of this action in the VM's current round was already started.
+    param($VMRecord, [string]$Action)
+    $round = [int](Get-PatchValue $VMRecord @('currentRound') 1)
+    $steps = @(Get-PatchArray (Get-PatchValue $VMRecord @('steps') @()) | Where-Object { [string](Get-PatchValue $_ @('action') '') -eq $Action -and [int](Get-PatchValue $_ @('round') 0) -eq $round })
+    if ($steps.Count -eq 0) { return $false }
+    return [bool](Get-PatchValue $steps[-1] @('startAttempted') $false)
+}
+
 function Test-PatchVmRequiresReboot {
     param($VMRecord)
     $reboot = Get-PatchValue $VMRecord @('reboot') $null
@@ -970,7 +979,9 @@ function Invoke-PatchAction {
         [Parameter(Mandatory = $true)][string]$RunPath,
         [Parameter(Mandatory = $true)][hashtable]$VCenterCredentials,
         # Guest credentials by credential group (see Get-PatchAccountGroup); kept in memory only.
-        [Parameter(Mandatory = $true)][hashtable]$GuestCredentials
+        [Parameter(Mandatory = $true)][hashtable]$GuestCredentials,
+        # Resume run: observe the installs and reboots already started; start no new ones (plan: Resume run).
+        [switch]$ObserveOnly
     )
 
     foreach ($credential in @($VCenterCredentials.Values) + @($GuestCredentials.Values)) { Register-PatchCredential -Credential $credential }
@@ -1033,6 +1044,7 @@ function Invoke-PatchAction {
                 elseif ($vmRecord.status -eq 'SkippedGuestAccount') { $skip = 'SkippedGuestAccount' }
                 elseif ($Action -eq 'Install' -and @(Get-PatchArray $vmRecord.selectedUpdates).Count -eq 0) { $skip = 'SkippedNoSelection' }
                 elseif ($Action -eq 'Reboot' -and -not (Test-PatchVmRequiresReboot -VMRecord $vmRecord)) { $skip = 'SkippedNoReboot' }
+                elseif ($ObserveOnly -and $Action -in @('Install', 'Reboot') -and -not (Test-PatchStepStarted -VMRecord $vmRecord -Action $Action)) { $skip = 'SkippedNotStarted' }
                 if ($null -ne $skip) {
                     $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = $skip; error = $null }) -RebootBarrier ([ref]$rebootBarrier)
                     continue

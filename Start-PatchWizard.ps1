@@ -18,6 +18,7 @@ $script:Wizard = @{
     VCenterCredentials = @{}
     GuestCredentials = @{}
     PendingAction = $null
+    ObserveOnly = $false
     ActivePowerShell = $null
     ActiveAsyncResult = $null
     ActiveAction = $null
@@ -272,8 +273,8 @@ function Resume-WizardRun {
         # An interrupted action continues by observing the steps it already started (plan: Resume run).
         $currentAction = [string](Get-PatchValue $state @('currentAction') '')
         if ([string]$state.status -eq 'Running' -and $currentAction -in @('Scan', 'Install', 'Reboot', 'Verify')) {
-            Set-WizardStatus -Message ('{0} was interrupted; it continues without starting finished or running steps again.' -f $currentAction)
-            Start-WizardAction -Action $currentAction -ApprovalAlreadyGiven
+            Set-WizardStatus -Message ('{0} was interrupted; its started steps are observed again. Nothing new is started without a new approval.' -f $currentAction)
+            Start-WizardAction -Action $currentAction -ApprovalAlreadyGiven -ObserveOnly
         }
     }
     catch {
@@ -560,9 +561,13 @@ function Start-WizardAction {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('Scan', 'Install', 'Reboot', 'Verify')][string]$Action,
         [switch]$ApprovalAlreadyGiven,
-        [switch]$VmsResolved
+        [switch]$VmsResolved,
+        # Resume run: only observe installs and reboots started before the interruption.
+        [switch]$ObserveOnly
     )
 
+    if ($ObserveOnly) { $script:Wizard.ObserveOnly = $true }
+    elseif (-not $ApprovalAlreadyGiven) { $script:Wizard.ObserveOnly = $false }
     try {
         if ($null -ne $script:Wizard.ActivePowerShell) { throw 'An action is already running.' }
         if ($null -eq $script:Wizard.RunState -or [string]::IsNullOrWhiteSpace([string]$script:Wizard.RunPath)) { throw 'Create or resume a run first.' }
@@ -610,11 +615,11 @@ function Start-WizardWorker {
     param([Parameter(Mandatory = $true)][string]$Action)
 
     $workerScript = {
-        param($ControllerPath, $ActionName, $RunFilePath, $VCenterCredentials, $GuestCredentials)
+        param($ControllerPath, $ActionName, $RunFilePath, $VCenterCredentials, $GuestCredentials, $ObserveOnly)
         try {
             . $ControllerPath
             if ($ActionName -eq 'Resolve') { return (Resolve-PatchVms -RunPath $RunFilePath -VCenterCredentials $VCenterCredentials) }
-            return (Invoke-PatchAction -Action $ActionName -RunPath $RunFilePath -VCenterCredentials $VCenterCredentials -GuestCredentials $GuestCredentials)
+            return (Invoke-PatchAction -Action $ActionName -RunPath $RunFilePath -VCenterCredentials $VCenterCredentials -GuestCredentials $GuestCredentials -ObserveOnly:$ObserveOnly)
         }
         catch {
             return [pscustomobject]@{ status = 'Stopped'; action = $ActionName; error = $_.Exception.Message }
@@ -627,6 +632,7 @@ function Start-WizardWorker {
     [void]$powerShell.AddArgument([string]$script:Wizard.RunPath)
     [void]$powerShell.AddArgument($script:Wizard.VCenterCredentials)
     [void]$powerShell.AddArgument($script:Wizard.GuestCredentials)
+    [void]$powerShell.AddArgument([bool]$script:Wizard.ObserveOnly)
     $script:Wizard.ActivePowerShell = $powerShell
     $script:Wizard.ActiveAsyncResult = $powerShell.BeginInvoke()
     $script:Wizard.ActiveAction = $Action
@@ -709,8 +715,10 @@ function Complete-WizardAction {
             })
             $resultSummary = '{0} finished: {1}.' -f $action, $(if ($groups.Count -gt 0) { $groups -join '; ' } else { $resultStatus })
             if ($resultStatus -ne 'Completed') { $resultSummary += ' Details for each VM are in errors.log.' }
+            if ($script:Wizard.ObserveOnly -and $action -in @('Install', 'Reboot')) { $resultSummary += (' VMs not started before the interruption (SkippedNotStarted) need a new {0} approval.' -f $action) }
         }
     }
+    $script:Wizard.ObserveOnly = $false
 
     Refresh-WizardVmGrid
     Refresh-WizardSelectionGrid

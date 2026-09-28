@@ -149,6 +149,15 @@ try {
             Assert ($script:AgentStarts -eq 1) "$action started the guest agent $($script:AgentStarts) times."
             Assert ($result.status -in @('Completed', 'Confirmed')) "$action did not observe the final result: $($result.status) $($result.error)"
         }
+        # Resume run only observes: an install that was never started is not started without a new approval.
+        $script:AgentStarts = 0
+        $path = (New-TestRun 'resume-observe').runPath
+        [void](Resolve-PatchVms -RunPath $path -VCenterCredentials @{ '*' = $credential })
+        $run = Read-PatchRun $path
+        Set-PatchValue $run.vms[0] 'selectedUpdates' @([pscustomobject]@{ updateId = 'KB-1'; revisionNumber = 1 })
+        Write-PatchRun -RunPath $path -RunState $run | Out-Null
+        $result = Invoke-PatchAction -Action Install -RunPath $path -VCenterCredentials @{ '*' = $credential } -GuestCredentials @{ 'example.test' = $credential } -ObserveOnly
+        Assert ($script:AgentStarts -eq 0 -and $result.vmResults[0].status -eq 'SkippedNotStarted') "Resume started a new install: $($result.vmResults[0].status)"
     }
 
     Invoke-Check 'The agent installs only approved UpdateID + RevisionNumber pairs and blocks cluster members' {
