@@ -696,6 +696,7 @@ function Complete-WizardAction {
         return
     }
 
+    $resultSummary = $null
     if ($null -ne $result) {
         $resultStatus = [string](Get-PatchValue $result @('status') 'Unknown')
         $credentialDecision = Resolve-WizardCredentialRejection -Action $action
@@ -704,7 +705,13 @@ function Complete-WizardAction {
             return
         }
         if ($credentialDecision -eq 'None') {
-            Set-WizardStatus -Message ('{0} finished with status {1}.' -f $action, $resultStatus)
+            # Per-status counts; VMs that did not complete are named so the operator sees what failed.
+            $groups = @(@(Get-PatchArray (Get-PatchValue $result @('vmResults') @())) | Group-Object -Property status | ForEach-Object {
+                if ($_.Name -in @('Completed', 'Confirmed')) { '{0} {1}' -f $_.Name, $_.Count }
+                else { '{0} {1} ({2})' -f $_.Name, $_.Count, (@($_.Group | ForEach-Object { $_.vmName }) -join ', ') }
+            })
+            $resultSummary = '{0} finished: {1}.' -f $action, $(if ($groups.Count -gt 0) { $groups -join '; ' } else { $resultStatus })
+            if ($resultStatus -ne 'Completed') { $resultSummary += ' Details for each VM are in errors.log.' }
         }
     }
 
@@ -715,11 +722,13 @@ function Complete-WizardAction {
     Update-WizardProgress
     Update-WizardStepState
     if ($credentialDecision -in @('Skip', 'Stop', 'Cancel')) { return }
+    if ($null -eq $resultSummary) { $resultSummary = '{0} finished.' -f $action }
+    # Written after Refresh-WizardRunLog, which replaces the log box with run.log.
     switch ($action) {
-        'Scan' { $script:Wizard.Tabs.SelectedIndex = 2; Set-WizardStatus -Message 'Scan finished. Review and save the offered update selections.' }
-        'Install' { $script:Wizard.Tabs.SelectedIndex = 4; Set-WizardStatus -Message 'Install finished. Only VMs with fresh pending reboot evidence are shown.' }
-        'Reboot' { $script:Wizard.Tabs.SelectedIndex = 5; Set-WizardStatus -Message 'Reboot action finished. Run Verify for a fresh result.' }
-        'Verify' { $script:Wizard.Tabs.SelectedIndex = 5; Set-WizardStatus -Message 'Verify finished. Start another round explicitly or finish the run.' }
+        'Scan' { $script:Wizard.Tabs.SelectedIndex = 2; Set-WizardStatus -Message ($resultSummary + ' Review and save the offered update selections.') }
+        'Install' { $script:Wizard.Tabs.SelectedIndex = 4; Set-WizardStatus -Message ($resultSummary + ' Only VMs with fresh pending reboot evidence are shown.') }
+        'Reboot' { $script:Wizard.Tabs.SelectedIndex = 5; Set-WizardStatus -Message ($resultSummary + ' Run Verify for a fresh result.') }
+        'Verify' { $script:Wizard.Tabs.SelectedIndex = 5; Set-WizardStatus -Message ($resultSummary + ' Start another round explicitly or finish the run.') }
     }
 }
 
