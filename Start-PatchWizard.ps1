@@ -790,7 +790,7 @@ function Start-WizardNewRound {
             Set-PatchValue -InputObject $vm -Name 'availableUpdates' -Value @()
             Set-PatchValue -InputObject $vm -Name 'selectedUpdates' -Value @()
             Set-PatchValue -InputObject $vm -Name 'deselectedUpdates' -Value @()
-            Set-PatchValue -InputObject $vm -Name 'pendingUpdates' -Value @()
+            # pendingUpdates stays until the next scan, so finishing right after a new round still lists what is left.
             Set-PatchValue -InputObject $vm -Name 'reboot' -Value ([pscustomobject]@{ status = 'NotRequested'; required = $false; confirmedBootTime = $null })
             # A skipped guest account stays skipped for the rest of the run.
             if ([string](Get-PatchValue $vm @('status') '') -ne 'SkippedGuestAccount') { Set-PatchValue -InputObject $vm -Name 'status' -Value 'Pending' }
