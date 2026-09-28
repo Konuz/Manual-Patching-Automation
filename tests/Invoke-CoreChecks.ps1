@@ -182,6 +182,17 @@ try {
             Assert ($script:AgentStarts -eq 1) "$action started the guest agent $($script:AgentStarts) times."
             Assert ($result.status -in @('Completed', 'Confirmed')) "$action did not observe the final result: $($result.status) $($result.error)"
         }
+        # A second pending reboot in the same round after a confirmed one is not sent by Resume run.
+        $resumed = Read-PatchRun $path
+        Set-PatchValue $resumed.vms[0] 'steps' @(@($resumed.vms[0].steps) | ForEach-Object { if ($_.action -eq 'Reboot') { $_.status = 'Confirmed' }; $_ })
+        Set-PatchValue $resumed.vms[0].reboot 'required' $true
+        Set-PatchValue $resumed.vms[0].reboot 'status' 'Pending'
+        Set-PatchValue $resumed.vms[0] 'accountGroup' 'example.test'
+        Set-PatchValue $resumed.vms[0] 'vCenter' 'vcenter-double'
+        Write-PatchRun -RunPath $path -RunState $resumed | Out-Null
+        $script:AgentStarts = 0
+        $result = Invoke-PatchAction -Action Reboot -RunPath $path -VCenterCredentials @{ '*' = $credential } -GuestCredentials @{ 'example.test' = $credential } -ObserveOnly
+        Assert ($script:AgentStarts -eq 0 -and $result.vmResults[0].status -eq 'SkippedNotStarted') "Resume sent a new reboot: $($result.vmResults[0].status)"
         # Resume run only observes: an install that was never started is not started without a new approval.
         $script:AgentStarts = 0
         $path = (New-TestRun 'resume-observe').runPath

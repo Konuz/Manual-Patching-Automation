@@ -549,12 +549,14 @@ function Get-PatchGuestPaths {
 }
 
 function Test-PatchStepStarted {
-    # True when the latest step of this action in the VM's current round was already started.
+    # True when the latest step of this action in the VM's current round was started and, for a reboot,
+    # is not settled yet. A settled reboot followed by a new pending reboot needs a new step and approval.
     param($VMRecord, [string]$Action)
     $round = [int](Get-PatchValue $VMRecord @('currentRound') 1)
     $steps = @(Get-PatchArray (Get-PatchValue $VMRecord @('steps') @()) | Where-Object { [string](Get-PatchValue $_ @('action') '') -eq $Action -and [int](Get-PatchValue $_ @('round') 0) -eq $round })
-    if ($steps.Count -eq 0) { return $false }
-    return [bool](Get-PatchValue $steps[-1] @('startAttempted') $false)
+    if ($steps.Count -eq 0 -or -not [bool](Get-PatchValue $steps[-1] @('startAttempted') $false)) { return $false }
+    if ($Action -eq 'Reboot') { return (-not (Test-PatchMutatingStepReconciled -Step $steps[-1])) }
+    return $true
 }
 
 function Get-PatchClusterMembership {
