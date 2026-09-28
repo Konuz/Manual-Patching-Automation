@@ -637,9 +637,15 @@ function Update-PatchVmFromAgentStatus {
             Set-PatchValue -InputObject $VMRecord -Name 'pendingUpdates' -Value $updates
         }
         # A fresh scan is the current truth about a pending reboot; without one, a confirmed reboot stays Confirmed.
-        Set-PatchValue -InputObject $reboot -Name 'required' -Value $pendingReboot
-        if ($pendingReboot) { Set-PatchValue -InputObject $reboot -Name 'status' -Value 'Pending' }
-        elseif ([string]$reboot.status -ne 'Confirmed') { Set-PatchValue -InputObject $reboot -Name 'status' -Value 'NotRequested' }
+        # A sent reboot that is not confirmed yet stays offered, so approving Reboot again can confirm it.
+        if ($pendingReboot) {
+            Set-PatchValue -InputObject $reboot -Name 'required' -Value $true
+            Set-PatchValue -InputObject $reboot -Name 'status' -Value 'Pending'
+        }
+        elseif (-not (Test-PatchStepStarted -VMRecord $VMRecord -Action 'Reboot')) {
+            Set-PatchValue -InputObject $reboot -Name 'required' -Value $false
+            if ([string]$reboot.status -ne 'Confirmed') { Set-PatchValue -InputObject $reboot -Name 'status' -Value 'NotRequested' }
+        }
         return
     }
 
