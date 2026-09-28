@@ -4,6 +4,8 @@
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $repoRoot 'scripts\RunController.ps1')
+# The real status check, kept before the double below replaces it: resume relies on it.
+$script:RealReadGuestStatus = ${function:Read-GuestStatus}
 
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('PatchWizard-Checks-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
@@ -216,6 +218,18 @@ try {
         Write-PatchRun -RunPath $path -RunState $run | Out-Null
         $result = Invoke-PatchAction -Action Install -RunPath $path -VCenterCredentials @{ '*' = $credential } -GuestCredentials @{ 'example.test' = $credential } -ObserveOnly
         Assert ($script:AgentStarts -eq 0 -and $result.vmResults[0].status -eq 'SkippedNotStarted') "Resume restarted a failed install: $($result.vmResults[0].status)"
+        # A step is finished only by a final status.json with this run's IDs, its mode and finishedAt.
+        $runId = [Guid]::NewGuid(); $stepId = [Guid]::NewGuid()
+        $statusFile = Join-Path $testRoot 'status-check.json'
+        $readStatus = {
+            param($StepIdInFile, $FinishedAt)
+            [pscustomobject]@{ runId = $runId.ToString('D'); stepId = $StepIdInFile; mode = 'Install'; status = 'Completed'; finishedAt = $FinishedAt } | ConvertTo-Json | Set-Content -LiteralPath $statusFile
+            & $script:RealReadGuestStatus -Context $script:GuestContext -RunId $runId -StepId $stepId -ExpectedMode Install -LocalPath $statusFile
+        }
+        Assert ([string](& $readStatus $stepId.ToString('D') '2026-01-01T00:00:00Z').status -eq 'Completed') 'A matching final status was not accepted.'
+        foreach ($case in @(@([Guid]::NewGuid().ToString('D'), '2026-01-01T00:00:00Z'), @($stepId.ToString('D'), $null))) {
+            try { [void](& $readStatus $case[0] $case[1]); throw 'accepted' } catch { Assert ($_.Exception.Message -ne 'accepted') 'A status of another step or without finishedAt was accepted.' }
+        }
     }
 
     Invoke-Check 'The agent installs only approved UpdateID + RevisionNumber pairs and blocks cluster members' {
