@@ -783,7 +783,7 @@ function Set-WizardStepsReviewed {
         $blocked = @()
         foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
             $step = Get-PatchMutatingStepBlocker -RunState $script:Wizard.RunState -VMRecord $vm -CurrentStep $null
-            if ($null -ne $step) { $blocked += [pscustomobject]@{ VmName = [string](Get-PatchValue $vm @('vmName') ''); Step = $step } }
+            if ($null -ne $step) { $blocked += [pscustomobject]@{ VmName = [string](Get-PatchValue $vm @('vmName') ''); Step = $step; Vm = $vm } }
         }
         if ($blocked.Count -eq 0) {
             Set-WizardStatus -Message 'There are no unresolved install or reboot steps.'
@@ -795,6 +795,11 @@ function Set-WizardStepsReviewed {
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         foreach ($item in $blocked) {
             Set-PatchValue -InputObject $item.Step -Name 'status' -Value 'Reviewed'
+            if ([string]$item.Step.action -eq 'Reboot') {
+                # A reviewed reboot is not offered again until a new scan reports a pending reboot.
+                Set-PatchValue -InputObject $item.Vm.reboot -Name 'status' -Value 'Reviewed'
+                Set-PatchValue -InputObject $item.Vm.reboot -Name 'required' -Value $false
+            }
             Write-PatchEvent -RunPath $script:Wizard.RunPath -Message ('Operator marked the unresolved {0} step as reviewed.' -f $item.Step.action) -VMName $item.VmName -Step $item.Step.action -Level 'WARN'
         }
         Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null

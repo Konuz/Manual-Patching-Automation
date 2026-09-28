@@ -476,7 +476,6 @@ function New-PatchStep {
         deadlineAt = $null
         finishedAt = $null
         baselineBootTime = $null
-        confirmationDeadlineAt = $null
         agentStatus = $null
         error = $null
     }
@@ -824,11 +823,9 @@ function Wait-PatchReboot {
     $baseline = [datetime]::Parse([string]$Step.baselineBootTime).ToUniversalTime()
     $ignoreEsxi = Test-PatchIgnoreEsxi $RunState
     $localStatusPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step).status
-    if ([string]::IsNullOrWhiteSpace([string]$Step.confirmationDeadlineAt)) {
-        Set-PatchValue -InputObject $Step -Name 'confirmationDeadlineAt' -Value (Get-Date).ToUniversalTime().AddMinutes($TimeoutMinutes).ToString('o')
-        Save-PatchDecision -RunPath $RunPath -RunState $RunState
-    }
-    $deadline = [datetime]::Parse([string]$Step.confirmationDeadlineAt).ToUniversalTime()
+    # Every observation waits the full limit: approving Reboot again for an unconfirmed reboot (e.g. a long
+    # cumulative update) only waits again for a newer boot time; the reboot itself is never sent twice.
+    $deadline = (Get-Date).ToUniversalTime().AddMinutes($TimeoutMinutes)
 
     $lastError = $null
     while ($true) {

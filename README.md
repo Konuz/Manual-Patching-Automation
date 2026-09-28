@@ -61,7 +61,7 @@ The wizard does not automatically repeat a round, resend an uncertain install, o
 
 A failed or excluded VM (wrong name, FQDN mismatch, cluster member) is recorded and skipped; the other VMs continue. Cluster members (`ExcludedCluster`) are not offered for install or reboot; an unknown cluster state is also written to `errors.log`. Only a reboot that was sent but not confirmed stops the next reboot batches.
 
-If a started install or reboot has no final result (for example, the guest was restarted during installation), that VM is blocked for further installs and reboots, and **Start another round** stays disabled. Check the guest manually (agent log, Windows Update history, last boot time), then use **Mark steps reviewed** on the Verify tab.
+If a started install or reboot has no final result (for example, the guest was restarted during installation), that VM is blocked for further installs and reboots, and **Start another round** stays disabled. Check the guest manually (agent log, Windows Update history, last boot time), then use **Mark steps reviewed** on the Verify tab. A reviewed reboot is not offered again until a new scan reports a pending reboot. A reboot that is only slow to confirm (e.g. a long cumulative update) does not need a review: approving **Reboot** again only waits again for a newer boot time and never sends a second reboot.
 
 If the guest rejects the credential, the wizard asks: **Retry** with a new credential, **Skip these VMs** for the rest of the run, or **Stop**.
 
