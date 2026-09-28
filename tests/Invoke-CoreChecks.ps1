@@ -32,9 +32,16 @@ function New-TestVm {
 }
 
 $credential = New-Object System.Management.Automation.PSCredential('operator', (ConvertTo-SecureString 'check-secret' -AsPlainText -Force))
-$script:GuestContext = [pscustomobject]@{ ProgramData = $testRoot; VM = [pscustomobject]@{ Name = 'APP[01]' } }
+# Guest Operations file manager double: the real Send-GuestFile / Receive-GuestFile run against it.
+if (-not ('VMware.Vim.GuestFileAttributes' -as [type])) { Add-Type -TypeDefinition 'namespace VMware.Vim { public class GuestFileAttributes { } }' -WarningAction SilentlyContinue }
+$fileManager = [pscustomobject]@{}
+$fileManager | Add-Member ScriptMethod MakeDirectoryInGuest { param($vm, $auth, $path, $parents) }
+$fileManager | Add-Member ScriptMethod InitiateFileTransferToGuest { param($vm, $auth, $path, $attributes, $size, $overwrite) 'https://*:443/guestFile?id=1' }
+$fileManager | Add-Member ScriptMethod InitiateFileTransferFromGuest { param($vm, $auth, $path) [pscustomobject]@{ Url = 'https://*:443/guestFile?id=2' } }
+$script:GuestContext = [pscustomobject]@{ ProgramData = $testRoot; VM = [pscustomobject]@{ Name = 'APP[01]' }; VMView = [pscustomobject]@{ MoRef = 'vm-1' }; GuestAuth = $null; FileManager = $fileManager; EsxiHostName = 'esxi-double' }
 
-# vSphere / guest doubles (defined after the controller, so they replace the adapter functions).
+# vSphere / guest doubles (defined after the controller, so they replace the adapter functions and cmdlets).
+# The certificate options are observed where they take effect: the PowerCLI setting and the curl.exe arguments.
 $script:VmLookup = @()
 $script:ConnectFails = $false
 $script:VCenterFlags = @()
@@ -46,15 +53,22 @@ function Get-VM {
     $all = if ($null -ne $script:VmByServer) { $script:VmByServer[[string]$Server] } else { $script:VmLookup }
     if ($Id) { @($all | Where-Object { $_.Id -eq $Id }) } else { $all }
 }
-function Connect-PatchVCenter {
-    param([string]$ServerName, $Credential, [bool]$IgnoreVCenterCertificate)
-    $script:VCenterFlags += $IgnoreVCenterCertificate
+function Import-Module { param($Name) }
+function Set-PowerCLIConfiguration {
+    [CmdletBinding()] param($Scope, [string]$InvalidCertificateAction, $DefaultVIServerMode, [switch]$Confirm)
+    $script:VCenterFlags += ($InvalidCertificateAction -eq 'Ignore')
+}
+function Connect-VIServer {
+    [CmdletBinding()] param([string]$Server, $Credential)
     if ($script:ConnectFails) { throw 'vCenter refused check-secret' }
-    return $ServerName
+    return $Server
 }
 function Get-GuestContext { param($VM, $GuestCredential) $script:GuestContext }
-function Send-GuestFile { param($Context, [string]$LocalPath, [string]$GuestPath, [bool]$IgnoreEsxiCertificate) $script:EsxiFlags += $IgnoreEsxiCertificate }
-function Receive-GuestFile { param($Context, [string]$GuestPath, [string]$LocalPath, [bool]$IgnoreEsxiCertificate) $script:EsxiFlags += $IgnoreEsxiCertificate }
+function Invoke-PatchCurl {
+    param([string[]]$Arguments)
+    $script:EsxiFlags += ($Arguments -contains '--insecure')
+    if (@($Arguments | Where-Object { $_ -like 'https://esxi-double:443/*' }).Count -ne 1) { throw 'The transfer URL was not resolved to the ESXi host.' }
+}
 function Start-GuestAgent { param($Context, [string]$GuestAgentPath, [string]$Mode, [Guid]$RunId, [Guid]$StepId, [string]$SelectionPath) $script:AgentStarts++; 1000 }
 # The first read is the baseline before the reboot; later reads return a newer boot time.
 $script:BootReads = 0
