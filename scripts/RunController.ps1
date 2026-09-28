@@ -855,7 +855,9 @@ function Wait-PatchReboot {
             }
         }
         catch {
-            # Expected while the guest restarts.
+            # A rejected guest credential goes to the operator's Retry / Skip / Stop choice at once.
+            if ($_.Exception -is [System.Security.Authentication.InvalidCredentialException]) { throw }
+            # Other errors are expected while the guest restarts.
             $lastError = Protect-PatchText $_.Exception.Message
         }
         if ((Get-Date).ToUniversalTime() -ge $deadline) {
@@ -938,10 +940,10 @@ function Add-PatchVmResult {
         if ($status -eq 'Confirmed') {
             Set-PatchValue -InputObject $VMRecord.reboot -Name 'confirmedBootTime' -Value $Result.step.confirmedBootTime
         }
-        # A reboot that may have been sent but is not confirmed stops the next reboot batches (plan: step 5).
-        # A VM that failed before the reboot was sent affects only itself.
-        $step = Get-PatchValue $Result @('step') $null
-        if ($status -in @('PendingRebootConfirmation', 'NeedsReview') -and [bool](Get-PatchValue $step @('startAttempted') $false)) {
+        # A reboot that may have been sent but is not confirmed stops the next reboot batches (plan: step 5),
+        # whatever the result says (e.g. a rejected credential while observing). A VM that failed before its
+        # reboot was sent, or whose agent reported that it did not restart, affects only itself.
+        if ($status -ne 'Confirmed' -and (Test-PatchStepStarted -VMRecord $VMRecord -Action 'Reboot')) {
             $RebootBarrier.Value = $true
         }
     }
