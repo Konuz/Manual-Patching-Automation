@@ -814,6 +814,11 @@ function Wait-PatchReboot {
             if ([datetime]::Parse($bootTime).ToUniversalTime() -gt $baseline.AddMinutes(1)) {
                 Set-PatchValue -InputObject $Step -Name 'confirmedBootTime' -Value $bootTime
                 $result = [pscustomobject]@{ status = 'Confirmed'; step = $Step; agentStatus = $status; error = $null }
+                if ($null -eq $status) {
+                    # Plan: the reboot is confirmed by the newer boot time; without the agent's status.json it may not
+                    # be the reboot this step sent (e.g. the guest restarted on its own), so the log says so.
+                    Write-PatchEvent -RunPath $RunPath -Message 'Reboot confirmed by a newer boot time only; the agent''s status.json was not found.' -VMName $VMRecord.vmName -Step 'Reboot' -Level 'WARN'
+                }
                 Receive-PatchAgentLog -Context $context -RunState $RunState -VMRecord $VMRecord -Step $Step -RunPath $RunPath
                 break
             }
