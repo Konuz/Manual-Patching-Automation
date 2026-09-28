@@ -983,6 +983,7 @@ function Resolve-PatchVms {
 
     foreach ($credential in $VCenterCredentials.Values) { Register-PatchCredential -Credential $credential }
     $run = Read-PatchRun -RunPath $RunPath
+    $connection = $null
     try {
         $connection = Connect-PatchVCenters -Names $run.vCenters -Credentials $VCenterCredentials -IgnoreCertificate ([bool]$run.options.ignoreVCenterCertificate)
         if ($connection.Rejected.Count -gt 0) {
@@ -1014,6 +1015,8 @@ function Resolve-PatchVms {
         [void](Write-PatchError -RunPath $RunPath -Message $message -Step 'Resolve' -Code 'ControllerError')
         Write-PatchEvent -RunPath $RunPath -Message $message -Step 'Resolve' -Level 'ERROR'
         return [pscustomobject]@{ status = 'Stopped'; action = 'Resolve'; error = $message }
+    }    finally {
+        if ($null -ne $connection) { foreach ($server in $connection.Servers.Values) { Disconnect-PatchVCenter -Server $server } }
     }
 }
 
@@ -1031,6 +1034,7 @@ function Invoke-PatchAction {
 
     foreach ($credential in @($VCenterCredentials.Values) + @($GuestCredentials.Values)) { Register-PatchCredential -Credential $credential }
     $run = $null
+    $connection = $null
     $resultRows = @()
     try {
         $run = Read-PatchRun -RunPath $RunPath
@@ -1144,5 +1148,7 @@ function Invoke-PatchAction {
             return [pscustomobject]@{ status = 'Stopped'; action = $Action; runId = [string](Get-PatchValue $run @('runId') ''); runPath = $runFile; vmResults = @($resultRows); error = $message }
         }
         throw
+    }    finally {
+        if ($null -ne $connection) { foreach ($server in $connection.Servers.Values) { Disconnect-PatchVCenter -Server $server } }
     }
 }

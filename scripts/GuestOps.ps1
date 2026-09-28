@@ -22,6 +22,13 @@ function Connect-PatchVCenter {
     return (Connect-VIServer -Server $ServerName -Credential $Credential -ErrorAction Stop)
 }
 
+function Disconnect-PatchVCenter {
+    # Ends the vCenter session of one action; a failure here does not change the action's result.
+    param($Server)
+    try { Disconnect-VIServer -Server $Server -Force -Confirm:$false -ErrorAction Stop }
+    catch { }
+}
+
 function Test-PatchLoginRejected {
     # True when vCenter rejected the user name or password (compared by type name, so PowerCLI
     # types need not be loaded).
