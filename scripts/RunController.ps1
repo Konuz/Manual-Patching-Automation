@@ -595,10 +595,15 @@ function Update-PatchVmFromAgentStatus {
     $system = Get-PatchValue $Status @('system') $null
     $pendingReboot = [bool](Get-PatchValue (Get-PatchValue $system @('pendingReboot') $null) @('isPending') $false)
     $reboot = Get-PatchValue $VMRecord @('reboot') $null
+    # Only a successful Windows Update search (WUA result 2) is a new truth about the offered updates;
+    # after a blocked or failed search the previous lists stay.
+    $searchSucceeded = [int](Get-PatchValue (Get-PatchValue $Status @('searchResult') $null) @('resultCode') 0) -eq 2
 
     if ($Action -eq 'Scan' -or $Action -eq 'Verify') {
-        Set-PatchValue -InputObject $VMRecord -Name 'availableUpdates' -Value $updates
-        Set-PatchValue -InputObject $VMRecord -Name 'pendingUpdates' -Value $updates
+        if ($searchSucceeded) {
+            Set-PatchValue -InputObject $VMRecord -Name 'availableUpdates' -Value $updates
+            Set-PatchValue -InputObject $VMRecord -Name 'pendingUpdates' -Value $updates
+        }
         # A fresh scan is the current truth about a pending reboot.
         Set-PatchValue -InputObject $reboot -Name 'required' -Value $pendingReboot
         Set-PatchValue -InputObject $reboot -Name 'status' -Value $(if ($pendingReboot) { 'Pending' } else { 'NotRequested' })
@@ -611,9 +616,7 @@ function Update-PatchVmFromAgentStatus {
         $installedNow = @($updates | Where-Object { & $isInstalled $_ })
         Set-PatchValue -InputObject $VMRecord -Name 'installedUpdates' -Value @(@(Get-PatchArray (Get-PatchValue $VMRecord @('installedUpdates') @())) + $installedNow)
         Set-PatchValue -InputObject $VMRecord -Name 'skippedUpdates' -Value @(@(Get-PatchArray (Get-PatchValue $VMRecord @('skippedUpdates') @())) + @(Get-PatchArray (Get-PatchValue $Status @('skipped') @())))
-        # Only a successful install-time search (WUA result 2) is a new truth about the pending updates;
-        # after a blocked or failed search the previous list stays.
-        if ([int](Get-PatchValue (Get-PatchValue $Status @('searchResult') $null) @('resultCode') 0) -eq 2) {
+        if ($searchSucceeded) {
             Set-PatchValue -InputObject $VMRecord -Name 'pendingUpdates' -Value @($updates | Where-Object { -not (& $isInstalled $_) })
         }
         $installReboot = [bool](Get-PatchValue (Get-PatchValue $Status @('installResult') $null) @('rebootRequired') $false)
