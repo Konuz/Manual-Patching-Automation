@@ -1290,15 +1290,15 @@ function Initialize-WizardUi {
 
     $statusPanel = New-Object System.Windows.Forms.Panel
     $statusPanel.Dock = [System.Windows.Forms.DockStyle]::Bottom
-    $statusPanel.Height = 118
+    $statusPanel.Height = 140
     $statusPanel.Padding = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
-    $statusLabel = New-WizardLabel -Text 'Create or resume a run.' -X 0 -Y 0 -Width 700 -Height 22
-    $progressLabel = New-WizardLabel -Text 'No active run' -X 705 -Y 0 -Width 350 -Height 22
+    $statusLabel = New-WizardLabel -Text 'Create or resume a run.' -X 0 -Y 0 -Width 850 -Height 44
+    $progressLabel = New-WizardLabel -Text 'No active run' -X 860 -Y 0 -Width 350 -Height 44
     $progress = New-Object System.Windows.Forms.ProgressBar
-    $progress.Location = New-Object System.Drawing.Point(0, 24)
+    $progress.Location = New-Object System.Drawing.Point(0, 46)
     $progress.Size = New-Object System.Drawing.Size(1210, 18)
     $statusText = New-Object System.Windows.Forms.TextBox
-    $statusText.Location = New-Object System.Drawing.Point(0, 48)
+    $statusText.Location = New-Object System.Drawing.Point(0, 70)
     $statusText.Size = New-Object System.Drawing.Size(1210, 65)
     $statusText.Multiline = $true
     $statusText.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
@@ -1349,7 +1349,7 @@ function Initialize-WizardUi {
 
     # Fields that take up leftover space when the window is wider/taller than the zoom needs.
     $script:Wizard.Stretch = @{}
-    foreach ($control in @($vcText, $vmHint, $vmText, $outputText, $certificateHint, $runPathLabel, $installHint, $rebootHint, $verifyHint, $progress)) { $script:Wizard.Stretch[$control] = 'Width' }
+    foreach ($control in @($statusLabel, $vcText, $vmHint, $vmText, $outputText, $certificateHint, $runPathLabel, $installHint, $rebootHint, $verifyHint, $progress)) { $script:Wizard.Stretch[$control] = 'Width' }
     foreach ($control in @($loadFile, $browseOutput, $progressLabel)) { $script:Wizard.Stretch[$control] = 'Right' }
     $script:Wizard.Stretch[$statusText] = 'Both'
     $form.Add_Shown({
