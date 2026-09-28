@@ -593,10 +593,15 @@ function Start-WizardAction {
             $plan = @(Get-PatchArray $script:Wizard.RunState.vms | Where-Object {
                     $_.status -ne 'SkippedGuestAccount' -and @(Get-PatchArray $_.selectedUpdates).Count -gt 0 -and
                     (Get-PatchClusterMembership -VMRecord $_) -eq 'NotMember' -and -not (Test-PatchInstallDone -VMRecord $_) -and
-                    $null -eq (Get-PatchMutatingStepBlocker -RunState $script:Wizard.RunState -VMRecord $_ -CurrentStep $null)
+                    ((Test-PatchStepStarted -VMRecord $_ -Action 'Install') -or
+                     $null -eq (Get-PatchMutatingStepBlocker -RunState $script:Wizard.RunState -VMRecord $_ -CurrentStep $null))
                 })
             if ($plan.Count -eq 0) { throw 'No VM will install in this round: select updates on scanned VMs. Cluster members, skipped accounts, VMs already installed in this round and VMs with an unreviewed install or reboot are left out.' }
-            $lines = @($plan | ForEach-Object { '{0}: {1} update(s)' -f $_.vmName, @(Get-PatchArray $_.selectedUpdates).Count })
+            # A started install without a final result (e.g. lost contact) is only observed again, never started twice.
+            $lines = @($plan | ForEach-Object {
+                    if (Test-PatchStepStarted -VMRecord $_ -Action 'Install') { '{0}: observe the install already started (it is not started again)' -f $_.vmName }
+                    else { '{0}: {1} update(s)' -f $_.vmName, @(Get-PatchArray $_.selectedUpdates).Count }
+                })
             $installPrompt = 'Install the selected updates on these VMs? The agent searches again and installs only matching UpdateID and RevisionNumber values; it does not reboot.{0}{0}{1}' -f [Environment]::NewLine, ($lines -join [Environment]::NewLine)
             $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, $installPrompt, 'Approve installation', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
             if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
