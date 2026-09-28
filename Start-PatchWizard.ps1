@@ -520,9 +520,11 @@ function Resolve-WizardCredentialRejection {
     if ($choice -eq 'Retry') {
         # Rejected on some VMs of a domain only (e.g. DMZ servers sharing the DNS suffix): those VMs
         # get their own credential. Rejected on every VM of the domain: the domain password is asked again.
+        # Only a result that needed a guest login shows that the credential worked; skipped VMs show nothing.
+        $loggedIn = @('Completed', 'CompletedWithErrors', 'Confirmed', 'NeedsReview')
         $partlyRejected = @($affected | ForEach-Object { [string]$_.accountGroup } | Sort-Object -Unique | Where-Object {
                 $group = $_
-                -not $group.StartsWith('vm:') -and @($allVms | Where-Object { $_.accountGroup -eq $group -and $_.status -ne 'GuestCredentialRejected' }).Count -gt 0
+                -not $group.StartsWith('vm:') -and @($allVms | Where-Object { $_.accountGroup -eq $group -and $_.status -in $loggedIn }).Count -gt 0
             })
         foreach ($vm in $affected) {
             $group = [string]$vm.accountGroup
