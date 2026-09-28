@@ -674,12 +674,13 @@ function Invoke-PatchAgentStep {
     $step = Get-PatchStep -VMRecord $VMRecord -Action $Action -Round $round
     $agentMode = [string](Get-PatchValue $step @('agentMode') '')
     $stepStatus = [string](Get-PatchValue $step @('status') '')
-    if ($stepStatus -in @('Completed', 'CompletedWithErrors', 'Failed', 'Reviewed')) {
+    $readOnly = $Action -in @('Scan', 'Verify')
+    if ($stepStatus -in @('Completed', 'CompletedWithErrors', 'Failed', 'Reviewed') -or ($readOnly -and $stepStatus -eq 'NeedsReview')) {
         # A finished install is never repeated in the same round; a new round starts a new step.
         if ($Action -eq 'Install') {
             return [pscustomobject]@{ status = $stepStatus; step = $step; agentStatus = Get-PatchValue $step @('agentStatus') $null; error = Get-PatchValue $step @('error') $null }
         }
-        # Scan and Verify are read-only: repeating them runs a fresh scan.
+        # Scan and Verify are read-only: repeating them, also after a scan without a final result, runs a fresh scan.
         $step = New-PatchStep -Action $Action -AgentMode $agentMode -Round $round
         Set-PatchValue -InputObject $VMRecord -Name 'steps' -Value @(@(Get-PatchArray (Get-PatchValue $VMRecord @('steps') @())) + $step)
     }
