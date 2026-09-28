@@ -920,7 +920,9 @@ function Add-PatchVmResult {
 
     $message = [string](Get-PatchValue $Result @('error') '')
     $level = 'INFO'
-    if (-not [string]::IsNullOrWhiteSpace($message)) {
+    # A reboot held back by the barrier is not a fault of this VM: its reason goes to run.log as a warning only.
+    if ($status -eq 'PendingRebootBarrier' -and -not [string]::IsNullOrWhiteSpace($message)) { $level = 'WARN' }
+    elseif (-not [string]::IsNullOrWhiteSpace($message)) {
         $message = Protect-PatchText $message
         $level = 'ERROR'
         # The agent's outcome (e.g. SearchFailed, InstallFailed) is the more specific error code.
