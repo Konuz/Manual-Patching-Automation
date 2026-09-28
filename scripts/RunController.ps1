@@ -759,7 +759,8 @@ function Invoke-PatchAgentStep {
             Set-PatchValue -InputObject $step -Name 'status' -Value 'NeedsReview'
             Set-PatchValue -InputObject $step -Name 'error' -Value (Protect-PatchText $_.Exception.Message)
             Save-PatchDecision -RunPath $RunPath -RunState $RunState
-            return [pscustomobject]@{ status = 'NeedsReview'; step = $step; agentStatus = $null; error = $_.Exception.Message }
+            # The start request may have reached the guest although its answer was lost: the agent may be running.
+            return [pscustomobject]@{ status = 'NeedsReview'; step = $step; agentStatus = $null; error = $_.Exception.Message; running = $true }
         }
     }
 
@@ -1168,8 +1169,10 @@ function Invoke-PatchAction {
             for ($index = 0; $index -lt $group.Count; $index += $batchSize) { [void]$batches.Add(@($group[$index..([Math]::Min($group.Count, $index + $batchSize) - 1)])) }
         }
         foreach ($batch in $batches) {
-            # Start every VM of the batch, then wait for each; at most workLimit agents run at once.
+            # Start every VM of the batch, then wait for each; at most workLimit agents run at once. An install that
+            # may still be running after this batch (lost start answer, time limit, lost contact) holds back the next.
             $started = @()
+            $mayRun = @()
             foreach ($vmRecord in $batch) {
                 if ($Action -eq 'Reboot' -and $rebootBarrier) {
                     $holding = @(Get-PatchArray $run.vms | Where-Object { Test-PatchStepStarted -VMRecord $_ -Action 'Reboot' } | ForEach-Object { [string]$_.vmName }) -join ', '
@@ -1190,14 +1193,16 @@ function Invoke-PatchAction {
                     $started += $vmRecord
                 }
                 else {
+                    if ($Action -eq 'Install' -and [bool](Get-PatchValue $result @('running') $false)) { $mayRun += [string]$vmRecord.vmName }
                     $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result $result -RebootBarrier ([ref]$rebootBarrier)
                 }
             }
             foreach ($vmRecord in $started) {
                 $result = & $invokeVm $vmRecord $false
-                if ($Action -eq 'Install' -and [bool](Get-PatchValue $result @('running') $false)) { $installHold += [string]$vmRecord.vmName }
+                if ($Action -eq 'Install' -and [bool](Get-PatchValue $result @('running') $false)) { $mayRun += [string]$vmRecord.vmName }
                 $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result $result -RebootBarrier ([ref]$rebootBarrier)
             }
+            $installHold += $mayRun
         }
 
         # After a Retry for some VMs, the others keep their result of this step in the run status.
