@@ -49,9 +49,13 @@ $script:EsxiFlags = @()
 $script:AgentStarts = 0
 $script:VmByServer = $null
 function Get-VM {
-    param([string]$Name, $Server, [string]$Id)
+    # Like PowerCLI: -Name is a wildcard pattern, and a name with no match is an ObjectNotFound error.
+    [CmdletBinding()] param([string]$Name, $Server, [string]$Id)
     $all = if ($null -ne $script:VmByServer) { $script:VmByServer[[string]$Server] } else { $script:VmLookup }
-    if ($Id) { @($all | Where-Object { $_.Id -eq $Id }) } else { $all }
+    if ($Id) { return @($all | Where-Object { $_.Id -eq $Id }) }
+    $named = @($all | Where-Object { $_.Name -like $Name })
+    if ($named.Count -eq 0) { Write-Error -Message ("VM with name '{0}' was not found using the specified filter(s)." -f $Name) -Category ObjectNotFound; return }
+    $named
 }
 function Import-Module { param($Name) }
 function Set-PowerCLIConfiguration {

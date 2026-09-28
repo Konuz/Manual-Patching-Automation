@@ -107,5 +107,6 @@ Before production use:
 11. With **Ignore ESXi certificates for file transfers** unchecked, confirm that file transfers work. The Windows `curl.exe` also checks certificate revocation, which may fail for internal ESXi/VMCA certificates (curl exit code 35 in `errors.log`; not verified yet).
 12. Confirm the guest policies let the agent run: a Group Policy execution policy of `AllSigned` overrides `-ExecutionPolicy Bypass` (the step ends as NeedsReview without `status.json`), and Constrained Language Mode or AppLocker blocks the cluster check (every VM shows cluster state `Unknown`).
 13. From the control workstation, confirm name resolution of the ESXi hosts and HTTPS (port 443) to them; file transfers go directly to the host that runs the VM.
+14. Enter one VM by its FQDN only and one VM whose name contains `[` or `]`; confirm both are found (PowerCLI `Get-VM -Name` is a wildcard filter; the name is escaped).
 
 Do not use a production VM for the first pilot. Cluster members and VMs with an unknown cluster state remain blocked for install and reboot.

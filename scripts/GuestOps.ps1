@@ -64,9 +64,11 @@ function Get-PatchVM {
 
     $findByName = {
         param([string]$VmName)
-        # Get-VM treats -Name as a wildcard pattern, so escape it and compare literally.
-        @(Get-VM -Name ([System.Management.Automation.WildcardPattern]::Escape($VmName)) -Server $Server -ErrorAction Stop |
-            Where-Object { [string]::Equals([string]$_.Name, $VmName, [System.StringComparison]::OrdinalIgnoreCase) })
+        # Get-VM treats -Name as a wildcard pattern, so escape it and compare literally. A name that is not
+        # there is reported as an ObjectNotFound error ("was not found using the specified filter(s)").
+        try { $named = @(Get-VM -Name ([System.Management.Automation.WildcardPattern]::Escape($VmName)) -Server $Server -ErrorAction Stop) }
+        catch { if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { return @() }; throw }
+        @($named | Where-Object { [string]::Equals([string]$_.Name, $VmName, [System.StringComparison]::OrdinalIgnoreCase) })
     }
     if (-not [string]::IsNullOrWhiteSpace($SavedId)) {
         $found = @(Get-VM -Id $SavedId -Server $Server -ErrorAction Stop)
