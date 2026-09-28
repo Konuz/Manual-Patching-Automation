@@ -645,6 +645,7 @@ function Wait-PatchAgent {
     $deadline = [datetime]::Parse([string]$Step.deadlineAt).ToUniversalTime()
 
     $lastError = $null
+    $agentEnded = $false
     while ($true) {
         try {
             $status = Read-GuestStatus -Context $Context -RunId $RunState.runId -StepId $Step.stepId -ExpectedMode $mode -LocalPath $localStatusPath -IgnoreEsxiCertificate $ignoreEsxi
@@ -658,12 +659,17 @@ function Wait-PatchAgent {
             if ($state -eq 'Failed') {
                 return [pscustomobject]@{ status = 'Failed'; agentStatus = $status; error = [string](Get-PatchValue $status @('error') 'The guest agent failed.') }
             }
-            # The process ended without ever writing status.json: the agent did not run.
+            # The agent process is gone (ended, or the guest restarted) without a final status.json. The status
+            # was read once more after that, since the agent may have written it just before it ended.
+            if ($agentEnded) {
+                return [pscustomobject]@{ status = 'NeedsReview'; agentStatus = $null; error = 'The guest agent process ended without writing a final status.json.' }
+            }
             $processId = Get-PatchValue $Step @('processId') $null
-            if ($null -eq $status -and $null -ne $processId) {
+            if ($null -ne $processId) {
                 $process = @(Get-GuestProcess -Context $Context -ProcessId ([long]$processId))[0]
-                if ($null -ne $process -and $null -ne $process.EndTime) {
-                    return [pscustomobject]@{ status = 'NeedsReview'; agentStatus = $null; error = 'The guest agent process ended without writing status.json.' }
+                if ($null -eq $process -or $null -ne $process.EndTime) {
+                    $agentEnded = $true
+                    continue
                 }
             }
         }
