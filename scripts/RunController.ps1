@@ -612,7 +612,11 @@ function Update-PatchVmFromAgentStatus {
         $installedNow = @($updates | Where-Object { & $isInstalled $_ })
         Set-PatchValue -InputObject $VMRecord -Name 'installedUpdates' -Value @(@(Get-PatchArray (Get-PatchValue $VMRecord @('installedUpdates') @())) + $installedNow)
         Set-PatchValue -InputObject $VMRecord -Name 'skippedUpdates' -Value @(@(Get-PatchArray (Get-PatchValue $VMRecord @('skippedUpdates') @())) + @(Get-PatchArray (Get-PatchValue $Status @('skipped') @())))
-        Set-PatchValue -InputObject $VMRecord -Name 'pendingUpdates' -Value @($updates | Where-Object { -not (& $isInstalled $_) })
+        # Only a successful install-time search (WUA result 2) is a new truth about the pending updates;
+        # after a blocked or failed search the previous list stays.
+        if ([int](Get-PatchValue (Get-PatchValue $Status @('searchResult') $null) @('resultCode') 0) -eq 2) {
+            Set-PatchValue -InputObject $VMRecord -Name 'pendingUpdates' -Value @($updates | Where-Object { -not (& $isInstalled $_) })
+        }
         $installReboot = [bool](Get-PatchValue (Get-PatchValue $Status @('installResult') $null) @('rebootRequired') $false)
         if ($installReboot -or $pendingReboot) {
             Set-PatchValue -InputObject $reboot -Name 'required' -Value $true
