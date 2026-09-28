@@ -390,6 +390,9 @@ function Write-PatchSummary {
         $pending = @(Get-PatchArray $vm.pendingUpdates)
         $reboot = Get-PatchValue $vm @('reboot') ([pscustomobject]@{})
         $rebootStatus = [string](Get-PatchValue $reboot @('status') 'NotRequested')
+        # Earlier confirmed reboots stay visible when a later scan reports a new pending reboot.
+        $confirmedReboots = @(Get-PatchArray $vm.steps | Where-Object { [string]$_.action -eq 'Reboot' -and [string]$_.status -eq 'Confirmed' }).Count
+        if ($confirmedReboots -gt 0 -and $rebootStatus -ne 'Confirmed') { $rebootStatus = '{0} (confirmed reboots: {1})' -f $rebootStatus, $confirmedReboots }
         $vmErrors = @(Get-PatchArray $vm.errors)
         $errorLink = '[errors.log](errors.log)'
         # Updates are listed by title (e.g. "... KB5034439 ..."); a skipped selection has no title of its own.
@@ -626,9 +629,10 @@ function Update-PatchVmFromAgentStatus {
             Set-PatchValue -InputObject $VMRecord -Name 'availableUpdates' -Value $updates
             Set-PatchValue -InputObject $VMRecord -Name 'pendingUpdates' -Value $updates
         }
-        # A fresh scan is the current truth about a pending reboot.
+        # A fresh scan is the current truth about a pending reboot; without one, a confirmed reboot stays Confirmed.
         Set-PatchValue -InputObject $reboot -Name 'required' -Value $pendingReboot
-        Set-PatchValue -InputObject $reboot -Name 'status' -Value $(if ($pendingReboot) { 'Pending' } else { 'NotRequested' })
+        if ($pendingReboot) { Set-PatchValue -InputObject $reboot -Name 'status' -Value 'Pending' }
+        elseif ([string]$reboot.status -ne 'Confirmed') { Set-PatchValue -InputObject $reboot -Name 'status' -Value 'NotRequested' }
         return
     }
 
