@@ -387,8 +387,13 @@ function Refresh-WizardVmGrid {
 }
 
 function Get-WizardPendingRebootVms {
-    # Cluster members and VMs with an unknown cluster state are never offered for a reboot.
-    return @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()) | Where-Object { (Test-PatchVmRequiresReboot -VMRecord $_) -and (Get-PatchClusterMembership -VMRecord $_) -eq 'NotMember' })
+    # Only VMs the controller will reboot: not cluster members (or unknown), not skipped accounts, and not
+    # blocked by an install without a final result. A reboot that is not confirmed yet is listed (observed again).
+    return @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()) | Where-Object {
+            $blocker = Get-PatchMutatingStepBlocker -RunState $script:Wizard.RunState -VMRecord $_ -CurrentStep $null
+            (Test-PatchVmRequiresReboot -VMRecord $_) -and (Get-PatchClusterMembership -VMRecord $_) -eq 'NotMember' -and
+            $_.status -ne 'SkippedGuestAccount' -and ($null -eq $blocker -or [string]$blocker.action -eq 'Reboot')
+        })
 }
 
 function Refresh-WizardRebootGrid {
@@ -587,9 +592,10 @@ function Start-WizardAction {
             # The approval lists exactly the VMs the controller will install on (see its skip rules).
             $plan = @(Get-PatchArray $script:Wizard.RunState.vms | Where-Object {
                     $_.status -ne 'SkippedGuestAccount' -and @(Get-PatchArray $_.selectedUpdates).Count -gt 0 -and
-                    (Get-PatchClusterMembership -VMRecord $_) -eq 'NotMember' -and -not (Test-PatchInstallDone -VMRecord $_)
+                    (Get-PatchClusterMembership -VMRecord $_) -eq 'NotMember' -and -not (Test-PatchInstallDone -VMRecord $_) -and
+                    $null -eq (Get-PatchMutatingStepBlocker -RunState $script:Wizard.RunState -VMRecord $_ -CurrentStep $null)
                 })
-            if ($plan.Count -eq 0) { throw 'No VM will install in this round: select updates on scanned VMs. Cluster members, skipped accounts and VMs already installed in this round are left out.' }
+            if ($plan.Count -eq 0) { throw 'No VM will install in this round: select updates on scanned VMs. Cluster members, skipped accounts, VMs already installed in this round and VMs with an unreviewed install or reboot are left out.' }
             $lines = @($plan | ForEach-Object { '{0}: {1} update(s)' -f $_.vmName, @(Get-PatchArray $_.selectedUpdates).Count })
             $installPrompt = 'Install the selected updates on these VMs? The agent searches again and installs only matching UpdateID and RevisionNumber values; it does not reboot.{0}{0}{1}' -f [Environment]::NewLine, ($lines -join [Environment]::NewLine)
             $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, $installPrompt, 'Approve installation', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
