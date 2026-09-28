@@ -1195,7 +1195,9 @@ function Invoke-PatchAction {
             $started = @()
             foreach ($vmRecord in $batch) {
                 if ($Action -eq 'Reboot' -and $rebootBarrier) {
-                    $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = 'PendingRebootBarrier'; error = $null }) -RebootBarrier ([ref]$rebootBarrier)
+                    $holding = @(Get-PatchArray $run.vms | Where-Object { Test-PatchStepStarted -VMRecord $_ -Action 'Reboot' } | ForEach-Object { [string]$_.vmName }) -join ', '
+                    $barrierMessage = 'Not rebooted: the reboot of {0} is not confirmed yet. Approve Reboot again to observe it, or check the guest and use Mark steps reviewed.' -f $holding
+                    $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = 'PendingRebootBarrier'; error = $barrierMessage }) -RebootBarrier ([ref]$rebootBarrier)
                     continue
                 }
                 Set-PatchValue -InputObject $vmRecord -Name 'currentAction' -Value $Action
