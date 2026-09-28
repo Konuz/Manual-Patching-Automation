@@ -209,9 +209,12 @@ function Write-PatchRun {
 
     $jsonPath = Get-PatchRunJsonPath -RunPath $RunPath
     Set-PatchValue -InputObject $RunState -Name 'updatedAt' -Value (Get-PatchUtcNow)
-    $safeState = ConvertTo-PatchSafeValue -Value $RunState
     # Compact JSON: run.json is re-read every 500 ms during an action, and indentation made it several times larger.
-    $json = $safeState | ConvertTo-Json -Depth 20 -Compress
+    # The state is built from plain objects (no ordered dictionaries, whose nested arrays Windows PowerShell 5.1
+    # serializes wrongly), so it is serialized directly; a recursive copy took seconds for a large run.
+    $json = $RunState | ConvertTo-Json -Depth 20 -Compress
+    # Credentials live in memory only: a state field named like one is a programming error, never written.
+    if ($json -match '"[^"]*(?i:password|credential|secret|securestring|token)[^"]*":') { throw 'The run state must not contain a credential field.' }
     Write-PatchTextAtomic -Path $jsonPath -Text $json
     return $RunState
 }
@@ -259,7 +262,7 @@ function New-PatchRun {
         $seenVmNames[$name] = $true
         $expectedFqdn = [string]$entry.ExpectedFqdn
 
-        $vmRecords += [ordered]@{
+        $vmRecords += [pscustomobject]@{
             vmName = $name
             expectedFqdn = $expectedFqdn
             vCenter = $null
@@ -275,27 +278,27 @@ function New-PatchRun {
             installedUpdates = @()
             skippedUpdates = @()
             pendingUpdates = @()
-            reboot = [ordered]@{ status = 'NotRequested'; required = $false; confirmedBootTime = $null }
+            reboot = [pscustomobject]@{ status = 'NotRequested'; required = $false; confirmedBootTime = $null }
             steps = @()
             agentStatus = $null
             errors = @()
         }
     }
 
-    $state = [ordered]@{
+    $state = [pscustomobject]@{
         schemaVersion = 'patch-run-v1'
         runId = $runId
         createdAt = Get-PatchUtcNow
         updatedAt = Get-PatchUtcNow
         status = 'Created'
         vCenters = $vCenters
-        options = [ordered]@{
+        options = [pscustomobject]@{
             ignoreVCenterCertificate = [bool](& $option 'IgnoreVCenterCertificate' $false)
             ignoreEsxiCertificatesForFileTransfers = [bool](& $option 'IgnoreEsxiCertificatesForFileTransfers' $false)
             scanConcurrency = [int](& $option 'ScanConcurrency' 3)
             installConcurrency = [int](& $option 'InstallConcurrency' 3)
             rebootBatchSize = [int](& $option 'RebootBatchSize' 1)
-            limits = [ordered]@{
+            limits = [pscustomobject]@{
                 scanTimeoutMinutes = [int](& $option 'ScanTimeoutMinutes' 30)
                 installTimeoutMinutes = [int](& $option 'InstallTimeoutMinutes' 180)
                 rebootConfirmationTimeoutMinutes = [int](& $option 'RebootConfirmationTimeoutMinutes' 30)
