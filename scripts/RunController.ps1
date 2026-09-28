@@ -932,7 +932,8 @@ function Add-PatchVmResult {
 
     $vmName = [string]$VMRecord.vmName
     $status = [string]$Result.status
-    Set-PatchValue -InputObject $VMRecord -Name 'status' -Value $status
+    # A skip that only means "nothing to do in this step" keeps the VM's last real result as its status.
+    if ($status -notin @('SkippedNoSelection', 'SkippedNoReboot', 'SkippedInstalledThisRound')) { Set-PatchValue -InputObject $VMRecord -Name 'status' -Value $status }
     Set-PatchValue -InputObject $VMRecord -Name 'lastProcessedAction' -Value $Action
     $agentStatus = Get-PatchValue $Result @('agentStatus') $null
     if ($null -ne $agentStatus) { Set-PatchValue -InputObject $VMRecord -Name 'agentStatus' -Value ($agentStatus | Select-Object -Property * -ExcludeProperty updates) }
