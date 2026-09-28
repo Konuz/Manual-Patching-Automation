@@ -53,7 +53,7 @@ The wizard presents six steps. Actions that can change a guest require a separat
 1. **Settings** — choose the vCenter(s), VM entries, run folder, and concurrency. Create a new run or choose **Resume run**.
 2. **Scan** — start the scan. The guest reports offered updates, pending reboot state, and cluster membership (the **Cluster** column: `NotMember`, `Member` or `Unknown`; an unknown state is also written to `errors.log`).
 3. **Select updates** — review the per-VM list, including optional updates and drivers, then approve the selected `UpdateID + RevisionNumber` values for installation.
-4. **Install** — approve installation. The agent searches again and installs only the still-offered selected revisions. The agent does not reboot the guest. Install runs once per round (`SkippedInstalledThisRound` afterwards); updates found later, e.g. by Verify, are installed in another round.
+4. **Install** — approve installation. The agent searches again and installs only the still-offered selected revisions. The agent does not reboot the guest. A completed install runs once per round (`SkippedInstalledThisRound` afterwards); updates found later, e.g. by Verify, are installed in another round. An install the agent reported as failed may be approved again.
 5. **Reboot** — review the VMs with fresh reboot evidence and approve the reboot batch separately. The next batch waits for a newer boot time and running VMware Tools.
 6. **Verify** — start a fresh scan, then start another operator-selected round or finish the run with the remaining updates listed.
 
@@ -107,9 +107,10 @@ Before production use:
 9. With a list that mixes domain VMs and a DMZ VM, confirm the **Account group** column and that one credential is asked per domain and one for the DMZ VM.
 10. Confirm that the guest account runs the agent with full administrator rights through Guest Operations: the first Install must report per-update results, not an access-denied error. With UAC, a local administrator other than the built-in Administrator may get a restricted token (not verified yet).
 11. With **Ignore ESXi certificates for file transfers** unchecked, confirm that file transfers work. The Windows `curl.exe` also checks certificate revocation, which may fail for internal ESXi/VMCA certificates (curl exit code 35 in `errors.log`; not verified yet).
-12. Confirm the guest policies let the agent run: a Group Policy execution policy of `AllSigned` overrides `-ExecutionPolicy Bypass` (the step ends as NeedsReview without `status.json`), and Constrained Language Mode or AppLocker blocks the cluster check (every VM shows cluster state `Unknown`).
+12. Confirm the guest policies let the agent run: a Group Policy execution policy of `AllSigned` overrides `-ExecutionPolicy Bypass` (a scan or install ends as NeedsReview without `status.json`; a reboot is not sent and ends as `PendingRebootConfirmation` after the confirmation limit, which also stops later reboot batches), and Constrained Language Mode or AppLocker blocks the cluster check (every VM shows cluster state `Unknown`).
 13. From the control workstation, confirm name resolution of the ESXi hosts and HTTPS (port 443) to them; file transfers go directly to the host that runs the VM.
 14. Enter one VM by its FQDN only and one VM whose name contains `[` or `]`; confirm both are found (PowerCLI `Get-VM -Name` is a wildcard filter; the name is escaped).
 15. Stop one vCenter (or block it) and confirm the message: an unreachable vCenter stops the lookup for the whole run, and a run's vCenter list cannot be changed, so a new run is needed.
+16. With VMs on two vCenters and a long install, confirm that the VMs of the second vCenter are still observed after the wait (its session is idle meanwhile; an expired session shows as NeedsReview "could not be observed" and approving the step again observes it).
 
 Do not use a production VM for the first pilot. Cluster members and VMs with an unknown cluster state remain blocked for install and reboot.
