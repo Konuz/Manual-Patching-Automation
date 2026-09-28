@@ -89,52 +89,6 @@ function Get-PatchRunDirectory {
     return (Split-Path -Parent (Get-PatchRunJsonPath -RunPath $RunPath))
 }
 
-function ConvertTo-PatchSafeValue {
-    param($Value)
-
-    if ($null -eq $Value) {
-        return $null
-    }
-    if ($Value -is [string] -or $Value -is [ValueType]) {
-        return $Value
-    }
-    if ($Value -is [System.Collections.IDictionary]) {
-        $safeDictionary = [ordered]@{}
-        foreach ($key in @($Value.Keys)) {
-            $keyText = [string]$key
-            if ($keyText -match '(?i)password|credential|secret|securestring|token') {
-                continue
-            }
-            $safeDictionary[$keyText] = ConvertTo-PatchSafeValue -Value $Value[$key]
-        }
-        return $safeDictionary
-    }
-    if ($Value -is [System.Collections.IEnumerable]) {
-        $items = New-Object 'System.Collections.Generic.List[object]'
-        foreach ($item in $Value) {
-            [void]$items.Add($item)
-        }
-        # ConvertTo-Json in Windows PowerShell 5.1 serializes an object[] nested
-        # in an OrderedDictionary as a value/Count object. A generic List keeps
-        # empty, singleton, and multi-item JSON arrays intact.
-        $safeArray = New-Object 'System.Collections.Generic.List[object]'
-        for ($index = 0; $index -lt $items.Count; $index++) {
-            [void]$safeArray.Add((ConvertTo-PatchSafeValue -Value $items[$index]))
-        }
-        Write-Output -NoEnumerate $safeArray
-        return
-    }
-
-    $safeObject = [ordered]@{}
-    foreach ($property in @($Value.PSObject.Properties)) {
-        if ($property.Name -match '(?i)password|credential|secret|securestring|token') {
-            continue
-        }
-        $safeObject[$property.Name] = ConvertTo-PatchSafeValue -Value $property.Value
-    }
-    return $safeObject
-}
-
 function Write-PatchTextAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -210,8 +164,9 @@ function Write-PatchRun {
     $jsonPath = Get-PatchRunJsonPath -RunPath $RunPath
     Set-PatchValue -InputObject $RunState -Name 'updatedAt' -Value (Get-PatchUtcNow)
     # Compact JSON: run.json is re-read every 500 ms during an action, and indentation made it several times larger.
-    # The state is built from plain objects (no ordered dictionaries, whose nested arrays Windows PowerShell 5.1
-    # serializes wrongly), so it is serialized directly; a recursive copy took seconds for a large run.
+    # Serialized directly (a recursive copy took seconds for a large run). Windows PowerShell 5.1 writes an array
+    # wrapped in a PSObject (e.g. returned with Write-Output -NoEnumerate) as {"value":[...],"Count":n}, so arrays
+    # are put into the state as plain @(...) arrays.
     $json = $RunState | ConvertTo-Json -Depth 20 -Compress
     # Credentials live in memory only: a state field named like one is a programming error, never written.
     if ($json -match '"[^"]*(?i:password|credential|secret|securestring|token)[^"]*":') { throw 'The run state must not contain a credential field.' }
@@ -354,7 +309,7 @@ function Write-PatchError {
         vmName = $VMName
         step = $Step
         message = Protect-PatchText -Text $Message
-        context = ConvertTo-PatchSafeValue -Value $Context
+        context = $Context
     }
     $parent = Split-Path -Parent $errorPath
     if (-not (Test-Path -LiteralPath $parent -PathType Container)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
