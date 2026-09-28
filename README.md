@@ -63,7 +63,7 @@ A failed or excluded VM (wrong name, FQDN mismatch, cluster member) is recorded 
 
 If a started install or reboot has no final result (for example, the guest was restarted during installation), that VM is blocked for further installs and reboots, and **Start another round** stays disabled. Check the guest manually (agent log, Windows Update history, last boot time), then use **Mark steps reviewed** on the Verify tab. A reviewed reboot is not offered again until a new scan reports a pending reboot. A reboot that is only slow to confirm (e.g. a long cumulative update) does not need a review: approving **Reboot** again only waits again for a newer boot time and never sends a second reboot.
 
-If the guest rejects the credential, the wizard asks: **Retry** with a new credential, **Skip these VMs** for the rest of the run, or **Stop**.
+If the guest rejects the credential, the wizard asks: **Retry** with a new credential, **Skip these VMs** for the rest of the run, or **Stop**. Every rejected logon of a domain account counts toward its lockout threshold, so a credential rejected on two VMs of its group (and accepted by none) is not tried on the group's other VMs in that step; they are listed in the same dialog.
 
 ## Certificate choices
 

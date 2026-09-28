@@ -1084,24 +1084,40 @@ function Invoke-PatchAction {
             'Reboot' { [int](Get-PatchOption $run @('rebootBatchSize') 1) }
             default { [int](Get-PatchOption $run @('scanConcurrency') 3) }
         }
+        # Each rejected guest login of a domain account counts toward its lockout threshold. A credential rejected
+        # on two VMs of its group and accepted by none in this step is not tried on the group's other VMs; they
+        # get the same Retry / Skip / Stop choice. (One rejection alone may be a DMZ VM with its own account.)
+        $credentialState = @{}
         $invokeVm = {
             param($VMRecord, [bool]$StartOnly)
-            $guestCredential = $GuestCredentials[[string]$VMRecord.accountGroup]
-            if ([string]::IsNullOrWhiteSpace([string]$VMRecord.accountGroup)) {
+            $group = [string]$VMRecord.accountGroup
+            $guestCredential = $GuestCredentials[$group]
+            if ([string]::IsNullOrWhiteSpace($group)) {
                 return [pscustomobject]@{ status = 'Failed'; error = 'The VM was not found in vCenter; see the earlier Resolve error.' }
             }
             if ($null -eq $guestCredential) {
-                return [pscustomobject]@{ status = 'Failed'; error = ('No guest credential was entered for {0}.' -f $VMRecord.accountGroup) }
+                return [pscustomobject]@{ status = 'Failed'; error = ('No guest credential was entered for {0}.' -f $group) }
+            }
+            if (-not $credentialState.ContainsKey($group)) { $credentialState[$group] = @{ accepted = $false; rejectedOn = @() } }
+            $groupState = $credentialState[$group]
+            if (-not $groupState.accepted -and $groupState.rejectedOn.Count -ge 2) {
+                return [pscustomobject]@{ status = 'GuestCredentialRejected'; error = ('Not tried: the credential for {0} was rejected on {1}.' -f $group, ($groupState.rejectedOn -join ', ')) }
             }
             try {
-                Invoke-PatchVmAction -Action $Action -RunPath $runFile -RunState $run -VMRecord $VMRecord -Server $connection.Servers[[string]$VMRecord.vCenter] -GuestCredential $guestCredential -StartOnly:$StartOnly
+                $vmResult = Invoke-PatchVmAction -Action $Action -RunPath $runFile -RunState $run -VMRecord $VMRecord -Server $connection.Servers[[string]$VMRecord.vCenter] -GuestCredential $guestCredential -StartOnly:$StartOnly
+                # A result without an exception needed a guest login, except a reboot observation that timed out.
+                if ([string]$vmResult.status -ne 'PendingRebootConfirmation') { $groupState.accepted = $true }
+                $vmResult
             }
             catch {
                 # Get-GuestContext raises InvalidCredentialException when the guest rejects the account;
                 # the GUI then offers Retry, Skip or Stop (plan: step 1).
                 # While waiting for a started agent or reboot, a lost contact leaves the step running; approving the
                 # step again observes it (NeedsReview, not Failed).
-                if ($_.Exception -is [System.Security.Authentication.InvalidCredentialException]) { $code = 'GuestCredentialRejected'; $message = $_.Exception.Message }
+                if ($_.Exception -is [System.Security.Authentication.InvalidCredentialException]) {
+                    $groupState.rejectedOn += [string]$VMRecord.vmName
+                    $code = 'GuestCredentialRejected'; $message = $_.Exception.Message
+                }
                 elseif (-not $StartOnly) { $code = 'NeedsReview'; $message = 'The started {0} could not be observed: {1}' -f $Action, $_.Exception.Message }
                 else { $code = 'Failed'; $message = $_.Exception.Message }
                 [pscustomobject]@{ status = $code; error = $message }
