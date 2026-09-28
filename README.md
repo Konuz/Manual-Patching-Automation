@@ -78,6 +78,8 @@ Enabling one option does not enable the other. Ignoring a certificate means the 
 
 Each run is stored under `runs/<runId>/` (or the output folder selected in Settings). A new run starts with `run.json`. During actions, `run.log` is appended, `errors.log` is created when an error is recorded, per-VM status and agent log files appear when an agent step runs, and `summary.md` and `summary.csv` are created or refreshed whenever the controller writes a summary. A skipped VM or a newly created run therefore may not have every file. Use **Open logs** in the wizard or open the run folder directly.
 
+Each guest keeps the agent copy, `status.json` and `agent.log` under `%ProgramData%\WindowsPatchWizard\<runId>` as evidence; the wizard does not delete them, so remove that folder when the run is no longer needed.
+
 Use **Resume run** to continue an interrupted run. If an action was interrupted, the wizard observes the installs and reboots it had already started; VMs it had not started yet are shown as `SkippedNotStarted` and need a new approval of that step. Credentials are requested again and kept in memory only; passwords, secure strings, and credential objects are excluded from `run.json`, logs, and summaries.
 
 ## Offline verification
@@ -108,5 +110,6 @@ Before production use:
 12. Confirm the guest policies let the agent run: a Group Policy execution policy of `AllSigned` overrides `-ExecutionPolicy Bypass` (the step ends as NeedsReview without `status.json`), and Constrained Language Mode or AppLocker blocks the cluster check (every VM shows cluster state `Unknown`).
 13. From the control workstation, confirm name resolution of the ESXi hosts and HTTPS (port 443) to them; file transfers go directly to the host that runs the VM.
 14. Enter one VM by its FQDN only and one VM whose name contains `[` or `]`; confirm both are found (PowerCLI `Get-VM -Name` is a wildcard filter; the name is escaped).
+15. Stop one vCenter (or block it) and confirm the message: an unreachable vCenter stops the lookup for the whole run, and a run's vCenter list cannot be changed, so a new run is needed.
 
 Do not use a production VM for the first pilot. Cluster members and VMs with an unknown cluster state remain blocked for install and reboot.
