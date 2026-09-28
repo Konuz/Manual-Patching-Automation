@@ -30,7 +30,7 @@ app-02.example.test
 DMZ-WEB|dmz-web.dmz.local
 ```
 
-Enter one or more vCenters in **vCenter server(s)**, separated by commas. Each VM is looked up on all of them and bound to the one that has it; a name found on more than one vCenter is blocked.
+Enter one or more vCenters in **vCenter server(s)**, separated by commas. Each VM is looked up on all of them and bound to the one that has it; a name found on more than one vCenter is blocked. Only a powered-on VM with running VMware Tools counts, so a powered-off copy of the same name (e.g. a replication placeholder) does not block it.
 
 A name must resolve to exactly one VM. An FQDN that is not a VM name is looked up by its short name (`app-02`). The FQDN is optional; when one is given, VMware Tools must report it, otherwise the VM is blocked.
 
