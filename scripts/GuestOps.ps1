@@ -214,7 +214,10 @@ function Invoke-PatchCurl {
     $output = @(& $curl.Source @Arguments 2>&1)
     if ($LASTEXITCODE -ne 0) {
         # Remove any URL from curl's message: vSphere embeds a one-time token in the transfer URL.
-        $details = (@($output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() }) -join ' ') -replace 'https?://\S+', '<transfer URL>'
+        # A blank stderr line shows up as the bare text System.Management.Automation.RemoteException.
+        $lines = @($output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString().Trim() } |
+                Where-Object { $_ -and $_ -ne 'System.Management.Automation.RemoteException' })
+        $details = ($lines -join ' ') -replace 'https?://\S+', '<transfer URL>'
         throw ('curl.exe failed with exit code {0}. {1}' -f $LASTEXITCODE, $details).Trim()
     }
 }
