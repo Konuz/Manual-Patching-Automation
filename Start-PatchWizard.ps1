@@ -58,6 +58,28 @@ function Set-WizardStatus {
         $script:Wizard.Controls.StatusText.SelectionStart = $script:Wizard.Controls.StatusText.TextLength
         $script:Wizard.Controls.StatusText.ScrollToCaret()
     }
+    Update-WizardStatusLayout
+}
+
+function Update-WizardStatusLayout {
+    # The status area under the VM table: the message wraps and its box grows to fit it (at least two lines,
+    # text centered vertically); the progress text is right-aligned beside it; the progress bar and the log
+    # follow below. Runs after every message, progress change and window resize (after the zoom layout).
+    $controls = $script:Wizard.Controls
+    if ($null -eq $controls.StatusLabel -or $null -eq $controls.StatusLabel.Parent) { return }
+    $panel = $controls.StatusLabel.Parent
+    $width = $panel.ClientSize.Width - $panel.Padding.Right
+    $lineHeight = $controls.StatusLabel.Font.Height
+    $progressWidth = [System.Windows.Forms.TextRenderer]::MeasureText($controls.ProgressLabel.Text, $controls.ProgressLabel.Font).Width + 8
+    $messageWidth = [Math]::Max(50, $width - $progressWidth - 10)
+    $flags = [System.Windows.Forms.TextFormatFlags]::WordBreak
+    $messageHeight = [System.Windows.Forms.TextRenderer]::MeasureText($controls.StatusLabel.Text, $controls.StatusLabel.Font, (New-Object System.Drawing.Size($messageWidth, 0)), $flags).Height
+    $boxHeight = [Math]::Max(2 * $lineHeight, $messageHeight) + [int]($lineHeight / 2)
+    $controls.StatusLabel.SetBounds(0, 0, $messageWidth, $boxHeight)
+    $controls.ProgressLabel.SetBounds($width - $progressWidth, 0, $progressWidth, $boxHeight)
+    $controls.ProgressBar.SetBounds(0, $boxHeight + 2, $width, $controls.ProgressBar.Height)
+    $controls.StatusText.SetBounds(0, $controls.ProgressBar.Bottom + 6, $width, $controls.StatusText.Height)
+    $panel.Height = $controls.StatusText.Bottom + 5
 }
 
 function Show-WizardError {
@@ -457,6 +479,7 @@ function Update-WizardProgress {
     $script:Wizard.Controls.ProgressBar.Value = $percent
     if ([string]::IsNullOrWhiteSpace($actionText)) { $actionText = 'No action' }
     $script:Wizard.Controls.ProgressLabel.Text = ('{0}: {1} of {2} VM rows processed' -f $actionText, $done, $total)
+    Update-WizardStatusLayout
 }
 
 function Refresh-WizardRunLog {
@@ -968,6 +991,7 @@ function Update-WizardScale {
     }
     Set-WizardScaledBounds -Parent $form -Factor $factor
     Set-WizardGridMinimumWidths
+    Update-WizardStatusLayout
 }
 
 function New-WizardGrid {
@@ -1292,11 +1316,11 @@ function Initialize-WizardUi {
     $statusPanel.Dock = [System.Windows.Forms.DockStyle]::Bottom
     $statusPanel.Height = 140
     $statusPanel.Padding = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
+    # Positions and sizes in the status area are set by Update-WizardStatusLayout.
     $statusLabel = New-WizardLabel -Text 'Create or resume a run.' -X 0 -Y 0 -Width 850 -Height 44
     $progressLabel = New-WizardLabel -Text 'No active run' -X 860 -Y 0 -Width 350 -Height 44
-    # Centered vertically in their two-line space.
     $statusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-    $progressLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+    $progressLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
     $progress = New-Object System.Windows.Forms.ProgressBar
     $progress.Location = New-Object System.Drawing.Point(0, 46)
     $progress.Size = New-Object System.Drawing.Size(1210, 18)
@@ -1352,14 +1376,14 @@ function Initialize-WizardUi {
 
     # Fields that take up leftover space when the window is wider/taller than the zoom needs.
     $script:Wizard.Stretch = @{}
-    foreach ($control in @($statusLabel, $vcText, $vmHint, $vmText, $outputText, $certificateHint, $runPathLabel, $installHint, $rebootHint, $verifyHint, $progress)) { $script:Wizard.Stretch[$control] = 'Width' }
-    foreach ($control in @($loadFile, $browseOutput, $progressLabel)) { $script:Wizard.Stretch[$control] = 'Right' }
-    $script:Wizard.Stretch[$statusText] = 'Both'
+    foreach ($control in @($vcText, $vmHint, $vmText, $outputText, $certificateHint, $runPathLabel, $installHint, $rebootHint, $verifyHint)) { $script:Wizard.Stretch[$control] = 'Width' }
+    foreach ($control in @($loadFile, $browseOutput)) { $script:Wizard.Stretch[$control] = 'Right' }
     $form.Add_Shown({
         $script:Wizard.BaseClientSize = $script:Wizard.Form.ClientSize
         $script:Wizard.BaseFont = $script:Wizard.Form.Font
         Set-WizardGridMinimumWidths
         Save-WizardLayout -Parent $script:Wizard.Form
+        Update-WizardStatusLayout
     })
     # Live zoom while the window is dragged, maximized or restored; every tab behaves the same.
     $form.Add_Resize({ Update-WizardScale })
