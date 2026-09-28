@@ -59,7 +59,7 @@ The wizard presents six steps. Actions that can change a guest require a separat
 
 The wizard does not automatically repeat a round, resend an uncertain install, or send a second reboot after an interrupted run. A final agent result must match its `runId`, `stepId`, mode, and have a parseable `finishedAt`. A reboot counts as done only when the guest reports a boot time newer than the one saved before the reboot was sent.
 
-A failed or excluded VM (wrong name, FQDN mismatch, cluster member) is recorded and skipped; the other VMs continue. Only an unconfirmed reboot stops the next reboot batches.
+A failed or excluded VM (wrong name, FQDN mismatch, cluster member) is recorded and skipped; the other VMs continue. Cluster members (`ExcludedCluster`) are not offered for install or reboot; an unknown cluster state is also written to `errors.log`. Only a reboot that was sent but not confirmed stops the next reboot batches.
 
 If a started install or reboot has no final result (for example, the guest was restarted during installation), that VM is blocked for further installs and reboots, and **Start another round** stays disabled. Check the guest manually (agent log, Windows Update history, last boot time), then use **Mark steps reviewed** on the Verify tab.
 

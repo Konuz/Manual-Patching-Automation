@@ -386,7 +386,8 @@ function Refresh-WizardVmGrid {
 }
 
 function Get-WizardPendingRebootVms {
-    return @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()) | Where-Object { Test-PatchVmRequiresReboot -VMRecord $_ })
+    # Cluster members and VMs with an unknown cluster state are never offered for a reboot.
+    return @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()) | Where-Object { (Test-PatchVmRequiresReboot -VMRecord $_) -and (Get-PatchClusterMembership -VMRecord $_) -eq 'NotMember' })
 }
 
 function Refresh-WizardRebootGrid {

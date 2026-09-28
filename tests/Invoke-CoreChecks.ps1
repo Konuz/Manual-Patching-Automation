@@ -41,7 +41,11 @@ $script:VCenterFlags = @()
 $script:EsxiFlags = @()
 $script:AgentStarts = 0
 $script:VmByServer = $null
-function Get-VM { param([string]$Name, $Server, [string]$Id) if ($null -ne $script:VmByServer) { $script:VmByServer[[string]$Server] } else { $script:VmLookup } }
+function Get-VM {
+    param([string]$Name, $Server, [string]$Id)
+    $all = if ($null -ne $script:VmByServer) { $script:VmByServer[[string]$Server] } else { $script:VmLookup }
+    if ($Id) { @($all | Where-Object { $_.Id -eq $Id }) } else { $all }
+}
 function Connect-PatchVCenter {
     param([string]$ServerName, $Credential, [bool]$IgnoreVCenterCertificate)
     $script:VCenterFlags += $IgnoreVCenterCertificate
@@ -100,6 +104,21 @@ try {
                 catch { Assert ($_.Exception.Message -match "cluster membership is $membership") "$action was not blocked for ${membership}: $($_.Exception.Message) $($_.ScriptStackTrace)" }
             }
         }
+        # An excluded cluster member in the first reboot batch does not stop the reboot of the next VM.
+        $script:VmLookup = @((New-TestVm 'vm-1' 'clu01.example.test' 'CLU01'), (New-TestVm 'vm-2' 'app02.example.test' 'APP02'))
+        $path = (New-PatchRun -Config ([pscustomobject]@{ VCenter = 'vcenter-double'; OutputRoot = (Join-Path $testRoot 'cluster-batch'); Options = [pscustomobject]@{ RebootBatchSize = 1 } }) -VMEntries @(
+                [pscustomobject]@{ VmName = 'CLU01'; ExpectedFqdn = '' }, [pscustomobject]@{ VmName = 'APP02'; ExpectedFqdn = '' })).runPath
+        [void](Resolve-PatchVms -RunPath $path -VCenterCredentials @{ '*' = $credential })
+        $run = Read-PatchRun $path
+        foreach ($vm in $run.vms) {
+            Set-PatchValue $vm 'agentStatus' ([pscustomobject]@{ cluster = [pscustomobject]@{ membership = $(if ($vm.vmName -eq 'CLU01') { 'Member' } else { 'NotMember' }) } })
+            Set-PatchValue $vm.reboot 'required' $true
+            Set-PatchValue $vm.reboot 'status' 'Pending'
+        }
+        Write-PatchRun -RunPath $path -RunState $run | Out-Null
+        $result = Invoke-PatchAction -Action Reboot -RunPath $path -VCenterCredentials @{ '*' = $credential } -GuestCredentials @{ 'example.test' = $credential }
+        $statuses = (@($result.vmResults | ForEach-Object { '{0}={1}' -f $_.vmName, $_.status }) -join ';')
+        Assert ($statuses -eq 'CLU01=ExcludedCluster;APP02=Confirmed') "Reboot batches: $statuses"
     }
 
     Invoke-Check 'A controller error is written to errors.log and the summary at once, without secrets' {
@@ -155,6 +174,7 @@ try {
         [void](Resolve-PatchVms -RunPath $path -VCenterCredentials @{ '*' = $credential })
         $run = Read-PatchRun $path
         Set-PatchValue $run.vms[0] 'selectedUpdates' @([pscustomobject]@{ updateId = 'KB-1'; revisionNumber = 1 })
+        Set-PatchValue $run.vms[0] 'agentStatus' ([pscustomobject]@{ cluster = [pscustomobject]@{ membership = 'NotMember' } })
         Write-PatchRun -RunPath $path -RunState $run | Out-Null
         $result = Invoke-PatchAction -Action Install -RunPath $path -VCenterCredentials @{ '*' = $credential } -GuestCredentials @{ 'example.test' = $credential } -ObserveOnly
         Assert ($script:AgentStarts -eq 0 -and $result.vmResults[0].status -eq 'SkippedNotStarted') "Resume started a new install: $($result.vmResults[0].status)"
