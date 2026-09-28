@@ -210,7 +210,8 @@ function Write-PatchRun {
     $jsonPath = Get-PatchRunJsonPath -RunPath $RunPath
     Set-PatchValue -InputObject $RunState -Name 'updatedAt' -Value (Get-PatchUtcNow)
     $safeState = ConvertTo-PatchSafeValue -Value $RunState
-    $json = $safeState | ConvertTo-Json -Depth 20
+    # Compact JSON: run.json is re-read every 500 ms during an action, and indentation made it several times larger.
+    $json = $safeState | ConvertTo-Json -Depth 20 -Compress
     Write-PatchTextAtomic -Path $jsonPath -Text $json
     return $RunState
 }
@@ -481,7 +482,6 @@ function New-PatchStep {
         deadlineAt = $null
         finishedAt = $null
         baselineBootTime = $null
-        agentStatus = $null
         error = $null
     }
 }
@@ -619,7 +619,9 @@ function Update-PatchVmFromAgentStatus {
     param([string]$Action, $VMRecord, $Status)
 
     if ($null -eq $Status) { return }
-    Set-PatchValue -InputObject $VMRecord -Name 'agentStatus' -Value $Status
+    # The VM keeps the last agent status without its update list (that is in availableUpdates and pendingUpdates,
+    # and every step's full status is in the run folder as status-<vm>-<stepId>.json).
+    Set-PatchValue -InputObject $VMRecord -Name 'agentStatus' -Value ($Status | Select-Object -Property * -ExcludeProperty updates)
     $updates = @(Get-PatchArray (Get-PatchValue $Status @('updates') @()))
     $system = Get-PatchValue $Status @('system') $null
     $pendingReboot = [bool](Get-PatchValue (Get-PatchValue $system @('pendingReboot') $null) @('isPending') $false)
@@ -744,7 +746,8 @@ function Invoke-PatchAgentStep {
     if ($stepStatus -in @('Completed', 'CompletedWithErrors', 'Failed', 'Reviewed') -or ($readOnly -and $stepStatus -eq 'NeedsReview')) {
         # A finished install is never repeated in the same round; a new round starts a new step.
         if ($Action -eq 'Install') {
-            return [pscustomobject]@{ status = $stepStatus; step = $step; agentStatus = $step.agentStatus; error = $step.error }
+            # Invoke-PatchAction already skips such a VM (Test-PatchInstallDone); this keeps the rule at the step itself.
+            return [pscustomobject]@{ status = $stepStatus; step = $step; agentStatus = $null; error = $step.error }
         }
         # Scan and Verify are read-only: repeating them, also after a scan without a final result, runs a fresh scan.
         $step = New-PatchStep -Action $Action -AgentMode $agentMode -Round $round
@@ -799,7 +802,7 @@ function Invoke-PatchAgentStep {
     }
 
     if ($StartOnly) {
-        return [pscustomobject]@{ status = 'Started'; step = $step; agentStatus = $step.agentStatus; error = $null }
+        return [pscustomobject]@{ status = 'Started'; step = $step; agentStatus = $null; error = $null }
     }
 
     $waitResult = Wait-PatchAgent -Context $Context -RunState $RunState -VMRecord $VMRecord -Step $step -RunPath $RunPath -TimeoutMinutes $TimeoutMinutes
@@ -812,7 +815,6 @@ function Invoke-PatchAgentStep {
     }
     Receive-PatchAgentLog -Context $Context -RunState $RunState -VMRecord $VMRecord -Step $step -RunPath $RunPath
     Set-PatchValue -InputObject $step -Name 'status' -Value $waitResult.status
-    Set-PatchValue -InputObject $step -Name 'agentStatus' -Value $waitResult.agentStatus
     Update-PatchVmFromAgentStatus -Action $Action -VMRecord $VMRecord -Status $waitResult.agentStatus
     if ($null -ne $waitResult.error) { Set-PatchValue -InputObject $step -Name 'error' -Value (Protect-PatchText $waitResult.error) }
     if ($waitResult.status -eq 'Completed' -or $waitResult.status -eq 'CompletedWithErrors' -or $waitResult.status -eq 'Failed') { Set-PatchValue -InputObject $step -Name 'finishedAt' -Value (Get-PatchUtcNow) }
@@ -839,7 +841,6 @@ function Wait-PatchReboot {
             $vm = Get-PatchVM -Server $Server -Name $VMRecord.vmName -ExpectedFqdn $VMRecord.expectedFqdn -SavedId $VMRecord.vmId
             $context = Get-GuestContext -VM $vm -GuestCredential $GuestCredential
             $status = Read-GuestStatus -Context $context -RunId $RunState.runId -StepId $Step.stepId -ExpectedMode 'Reboot' -LocalPath $localStatusPath -IgnoreEsxiCertificate $ignoreEsxi
-            if ($null -ne $status) { Set-PatchValue -InputObject $Step -Name 'agentStatus' -Value $status }
             if ([string](Get-PatchValue $status @('status') '') -eq 'Failed') {
                 $result = [pscustomobject]@{ status = 'Failed'; step = $Step; agentStatus = $status; error = [string](Get-PatchValue $status @('error') 'The reboot command failed.') }
                 Receive-PatchAgentLog -Context $context -RunState $RunState -VMRecord $VMRecord -Step $Step -RunPath $RunPath
@@ -930,7 +931,7 @@ function Add-PatchVmResult {
     Set-PatchValue -InputObject $VMRecord -Name 'status' -Value $status
     Set-PatchValue -InputObject $VMRecord -Name 'lastProcessedAction' -Value $Action
     $agentStatus = Get-PatchValue $Result @('agentStatus') $null
-    if ($null -ne $agentStatus) { Set-PatchValue -InputObject $VMRecord -Name 'agentStatus' -Value $agentStatus }
+    if ($null -ne $agentStatus) { Set-PatchValue -InputObject $VMRecord -Name 'agentStatus' -Value ($agentStatus | Select-Object -Property * -ExcludeProperty updates) }
 
     if ($Action -eq 'Reboot' -and $status -notlike 'Skipped*' -and $status -notin @('PendingRebootBarrier', 'ExcludedCluster')) {
         Set-PatchValue -InputObject $VMRecord.reboot -Name 'status' -Value $status
