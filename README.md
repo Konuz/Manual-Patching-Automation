@@ -51,7 +51,7 @@ The groups are shown in the **Account group** column and saved in `run.json`; th
 The wizard presents six steps. Actions that can change a guest require a separate explicit approval in the corresponding step. The window content (fields, buttons, fonts, tabs) scales with the window size.
 
 1. **Settings** — choose the vCenter(s), VM entries, run folder, and concurrency. Create a new run or choose **Resume run**.
-2. **Scan** — start the scan. The guest reports offered updates, pending reboot state, and cluster membership.
+2. **Scan** — start the scan. The guest reports offered updates, pending reboot state, and cluster membership (the **Cluster** column: `NotMember`, `Member` or `Unknown`; an unknown state is also written to `errors.log`).
 3. **Select updates** — review the per-VM list, including optional updates and drivers, then approve the selected `UpdateID + RevisionNumber` values for installation.
 4. **Install** — approve installation. The agent searches again and installs only the still-offered selected revisions. The agent does not reboot the guest.
 5. **Reboot** — review the VMs with fresh reboot evidence and approve the reboot batch separately. The next batch waits for a newer boot time and running VMware Tools.

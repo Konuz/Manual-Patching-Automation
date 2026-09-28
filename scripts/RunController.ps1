@@ -736,6 +736,13 @@ function Invoke-PatchAgentStep {
     }
 
     $waitResult = Wait-PatchAgent -Context $Context -RunState $RunState -VMRecord $VMRecord -Step $step -RunPath $RunPath -TimeoutMinutes $TimeoutMinutes
+    if ($Action -in @('Scan', 'Verify') -and $waitResult.status -eq 'Completed') {
+        # Plan: an unrecognised cluster state blocks the VM and goes to the errors at once.
+        $cluster = Get-PatchValue $waitResult.agentStatus @('cluster') $null
+        if ([string](Get-PatchValue $cluster @('membership') 'Unknown') -eq 'Unknown') {
+            $waitResult.error = 'The cluster state is unknown ({0}); install and reboot are blocked for this VM.' -f [string](Get-PatchValue $cluster @('reason') 'no reason reported')
+        }
+    }
     try {
         $guestLogPath = Join-Path (Get-PatchGuestPaths -Context $Context -RunState $RunState -Step $step).directory 'agent.log'
         $agentLogLocalPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $step).agentLog

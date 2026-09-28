@@ -362,7 +362,7 @@ function Refresh-WizardVmGrid {
         if ($grid.Rows.Count -ne $vms.Count) {
             $grid.Rows.Clear()
             foreach ($vm in $vms) {
-                [void]$grid.Rows.Add('', '', '', '', '', '', '', '')
+                [void]$grid.Rows.Add('', '', '', '', '', '', '', '', '')
             }
         }
         for ($i = 0; $i -lt $vms.Count; $i++) {
@@ -375,9 +375,11 @@ function Refresh-WizardVmGrid {
             $grid.Rows[$i].Cells[3].Value = [string](Get-PatchValue $vm @('currentAction') '')
             $grid.Rows[$i].Cells[4].Value = [string]$updates.Count
             $grid.Rows[$i].Cells[5].Value = [string](Get-PatchValue $reboot @('status') 'NotRequested')
+            # Cluster membership from the last agent status; empty until the VM is scanned.
+            $grid.Rows[$i].Cells[6].Value = $(if ($null -eq (Get-PatchValue $vm @('agentStatus') $null)) { '' } else { Get-PatchClusterMembership -VMRecord $vm })
             $errors = @(Get-PatchArray (Get-PatchValue $vm @('errors') @()))
-            $grid.Rows[$i].Cells[6].Value = [string]$errors.Count
-            $grid.Rows[$i].Cells[7].Value = [string](Get-PatchValue $vm @('accountGroup') '')
+            $grid.Rows[$i].Cells[7].Value = [string]$errors.Count
+            $grid.Rows[$i].Cells[8].Value = [string](Get-PatchValue $vm @('accountGroup') '')
         }
     }
     finally {
@@ -1123,7 +1125,7 @@ function Initialize-WizardUi {
     $scanButton.Dock = [System.Windows.Forms.DockStyle]::Top
     $scanButton.Height = 34
     $scanButton.Add_Click({ Start-WizardAction -Action Scan })
-    $vmGrid = New-WizardGrid -Headers @('VM', 'Expected FQDN', 'Status', 'Current action', 'Offered updates', 'Reboot', 'Errors', 'Account group') -Widths @(170, 200, 135, 110, 95, 115, 55, 150)
+    $vmGrid = New-WizardGrid -Headers @('VM', 'Expected FQDN', 'Status', 'Current action', 'Offered updates', 'Reboot', 'Cluster', 'Errors', 'Account group') -Widths @(170, 200, 135, 110, 95, 115, 90, 55, 150)
     $scanTab.Controls.Add($vmGrid)
     $scanTab.Controls.Add($scanButton)
     [void]$tabs.TabPages.Add($scanTab)
