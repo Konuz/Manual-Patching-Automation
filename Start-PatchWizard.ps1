@@ -579,8 +579,14 @@ function Start-WizardAction {
         if ($credentialDecision -in @('Skip', 'Stop', 'Cancel')) { return }
         if ($Action -eq 'Install' -and -not $ApprovalAlreadyGiven) {
             Save-WizardSelections
-            $selectedCount = @(Get-PatchArray $script:Wizard.RunState.vms | ForEach-Object { Get-PatchArray $_.selectedUpdates }).Count
-            $installPrompt = if ($selectedCount -eq 0) { 'No updates are selected. Continue and mark all VM installations as skipped?' } else { 'Install {0} explicitly selected update entries? The agent will search again and install only matching UpdateID and RevisionNumber values.' -f $selectedCount }
+            # The approval lists exactly the VMs the controller will install on (see its skip rules).
+            $plan = @(Get-PatchArray $script:Wizard.RunState.vms | Where-Object {
+                    $_.status -ne 'SkippedGuestAccount' -and @(Get-PatchArray $_.selectedUpdates).Count -gt 0 -and
+                    (Get-PatchClusterMembership -VMRecord $_) -eq 'NotMember' -and -not (Test-PatchInstallDone -VMRecord $_)
+                })
+            if ($plan.Count -eq 0) { throw 'No VM will install in this round: select updates on scanned VMs. Cluster members, skipped accounts and VMs already installed in this round are left out.' }
+            $lines = @($plan | ForEach-Object { '{0}: {1} update(s)' -f $_.vmName, @(Get-PatchArray $_.selectedUpdates).Count })
+            $installPrompt = 'Install the selected updates on these VMs? The agent searches again and installs only matching UpdateID and RevisionNumber values; it does not reboot.{0}{0}{1}' -f [Environment]::NewLine, ($lines -join [Environment]::NewLine)
             $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, $installPrompt, 'Approve installation', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
             if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         }
