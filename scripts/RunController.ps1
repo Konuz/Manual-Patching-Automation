@@ -1122,29 +1122,35 @@ function Invoke-PatchAction {
             }
         }
 
-        for ($batchStart = 0; $batchStart -lt $vmRecords.Count; $batchStart += [Math]::Max(1, $workLimit)) {
+        # VMs that this action leaves out are recorded first, so a batch holds only VMs that run.
+        $toRun = @()
+        foreach ($vmRecord in $vmRecords) {
+            $skip = $null
+            $skipError = $null
+            $membership = Get-PatchClusterMembership -VMRecord $vmRecord
+            if ($vmRecord.status -eq 'SkippedGuestAccount') { $skip = 'SkippedGuestAccount' }
+            elseif ($Action -eq 'Install' -and @(Get-PatchArray $vmRecord.selectedUpdates).Count -eq 0) { $skip = 'SkippedNoSelection' }
+            elseif ($Action -eq 'Install' -and (Test-PatchInstallDone -VMRecord $vmRecord)) { $skip = 'SkippedInstalledThisRound' }
+            elseif ($Action -eq 'Reboot' -and -not (Test-PatchVmRequiresReboot -VMRecord $vmRecord)) { $skip = 'SkippedNoReboot' }
+            elseif ($Action -in @('Install', 'Reboot') -and $membership -ne 'NotMember') {
+                # Plan: a configured cluster node is excluded; an unrecognised state blocks the VM and is an error.
+                $skip = 'ExcludedCluster'
+                if ($membership -ne 'Member') { $skipError = ('{0} is blocked because the cluster membership is {1}.' -f $Action, $membership) }
+            }
+            elseif ($ObserveOnly -and $Action -in @('Install', 'Reboot') -and -not (Test-PatchStepStarted -VMRecord $vmRecord -Action $Action)) { $skip = 'SkippedNotStarted' }
+            if ($null -eq $skip) { $toRun += $vmRecord; continue }
+            $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = $skip; error = $skipError }) -RebootBarrier ([ref]$rebootBarrier)
+        }
+
+        $batchSize = [Math]::Max(1, $workLimit)
+        for ($batchStart = 0; $batchStart -lt $toRun.Count; $batchStart += $batchSize) {
             # Start every VM of the batch, then wait for each; at most workLimit agents run at once.
             $started = @()
-            foreach ($vmRecord in @($vmRecords[$batchStart..([Math]::Min($vmRecords.Count, $batchStart + [Math]::Max(1, $workLimit)) - 1)])) {
-                $skip = $null
-                $skipError = $null
-                $membership = Get-PatchClusterMembership -VMRecord $vmRecord
-                if ($Action -eq 'Reboot' -and $rebootBarrier) { $skip = 'PendingRebootBarrier' }
-                elseif ($vmRecord.status -eq 'SkippedGuestAccount') { $skip = 'SkippedGuestAccount' }
-                elseif ($Action -eq 'Install' -and @(Get-PatchArray $vmRecord.selectedUpdates).Count -eq 0) { $skip = 'SkippedNoSelection' }
-                elseif ($Action -eq 'Install' -and (Test-PatchInstallDone -VMRecord $vmRecord)) { $skip = 'SkippedInstalledThisRound' }
-                elseif ($Action -eq 'Reboot' -and -not (Test-PatchVmRequiresReboot -VMRecord $vmRecord)) { $skip = 'SkippedNoReboot' }
-                elseif ($Action -in @('Install', 'Reboot') -and $membership -ne 'NotMember') {
-                    # Plan: a configured cluster node is excluded; an unrecognised state blocks the VM and is an error.
-                    $skip = 'ExcludedCluster'
-                    if ($membership -ne 'Member') { $skipError = ('{0} is blocked because the cluster membership is {1}.' -f $Action, $membership) }
-                }
-                elseif ($ObserveOnly -and $Action -in @('Install', 'Reboot') -and -not (Test-PatchStepStarted -VMRecord $vmRecord -Action $Action)) { $skip = 'SkippedNotStarted' }
-                if ($null -ne $skip) {
-                    $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = $skip; error = $skipError }) -RebootBarrier ([ref]$rebootBarrier)
+            foreach ($vmRecord in @($toRun[$batchStart..([Math]::Min($toRun.Count, $batchStart + $batchSize) - 1)])) {
+                if ($Action -eq 'Reboot' -and $rebootBarrier) {
+                    $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = 'PendingRebootBarrier'; error = $null }) -RebootBarrier ([ref]$rebootBarrier)
                     continue
                 }
-
                 Set-PatchValue -InputObject $vmRecord -Name 'currentAction' -Value $Action
                 $result = & $invokeVm $vmRecord $true
                 if ($result.status -eq 'Started') {
