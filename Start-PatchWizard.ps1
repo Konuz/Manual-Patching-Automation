@@ -162,7 +162,8 @@ function Save-WizardSelections {
         }
         Set-PatchValue -InputObject $vm -Name 'selectedUpdates' -Value @($selected)
         $savedCount += $selected.Count
-        Set-PatchValue -InputObject $vm -Name 'selectionSaved' -Value $true
+        # A VM without offered updates (e.g. not scanned yet) keeps the default: all updates preselected.
+        Set-PatchValue -InputObject $vm -Name 'selectionSaved' -Value ($rows.Count -gt 0)
     }
 
     Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
@@ -267,7 +268,7 @@ function Resume-WizardRun {
         # An interrupted action continues by observing the steps it already started (plan: Resume run).
         $currentAction = [string](Get-PatchValue $state @('currentAction') '')
         if ([string]$state.status -eq 'Running' -and $currentAction -in @('Scan', 'Install', 'Reboot', 'Verify')) {
-            Set-WizardStatus -Message ('{0} was interrupted; its started steps are observed again. Nothing new is started without a new approval.' -f $currentAction)
+            Set-WizardStatus -Message ('{0} was interrupted; its started installs and reboots are observed again; nothing new is installed or rebooted without a new approval (a scan simply runs again).' -f $currentAction)
             Start-WizardAction -Action $currentAction -ApprovalAlreadyGiven -ObserveOnly
         }
     }
