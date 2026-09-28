@@ -1294,6 +1294,9 @@ function Initialize-WizardUi {
     $statusPanel.Padding = New-Object System.Windows.Forms.Padding(0, 0, 8, 0)
     $statusLabel = New-WizardLabel -Text 'Create or resume a run.' -X 0 -Y 0 -Width 850 -Height 44
     $progressLabel = New-WizardLabel -Text 'No active run' -X 860 -Y 0 -Width 350 -Height 44
+    # Centered vertically in their two-line space.
+    $statusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+    $progressLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
     $progress = New-Object System.Windows.Forms.ProgressBar
     $progress.Location = New-Object System.Drawing.Point(0, 46)
     $progress.Size = New-Object System.Drawing.Size(1210, 18)
