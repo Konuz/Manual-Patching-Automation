@@ -207,6 +207,15 @@ try {
         Write-PatchRun -RunPath $path -RunState $run | Out-Null
         $result = Invoke-PatchAction -Action Install -RunPath $path -VCenterCredentials @{ '*' = $credential } -GuestCredentials @{ 'example.test' = $credential } -ObserveOnly
         Assert ($script:AgentStarts -eq 0 -and $result.vmResults[0].status -eq 'SkippedNotStarted') "Resume started a new install: $($result.vmResults[0].status)"
+        # Nor is an install that already ended as Failed started again by Resume run.
+        $run = Read-PatchRun $path
+        $failedStep = New-PatchStep -Action Install -AgentMode Install -Round 1
+        $failedStep.startAttempted = $true
+        $failedStep.status = 'Failed'
+        Set-PatchValue $run.vms[0] 'steps' @($failedStep)
+        Write-PatchRun -RunPath $path -RunState $run | Out-Null
+        $result = Invoke-PatchAction -Action Install -RunPath $path -VCenterCredentials @{ '*' = $credential } -GuestCredentials @{ 'example.test' = $credential } -ObserveOnly
+        Assert ($script:AgentStarts -eq 0 -and $result.vmResults[0].status -eq 'SkippedNotStarted') "Resume restarted a failed install: $($result.vmResults[0].status)"
     }
 
     Invoke-Check 'The agent installs only approved UpdateID + RevisionNumber pairs and blocks cluster members' {

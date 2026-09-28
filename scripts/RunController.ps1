@@ -572,13 +572,13 @@ function Get-PatchLatestStep {
 }
 
 function Test-PatchStepStarted {
-    # True when the latest step of this action in the VM's current round was started and, for a reboot,
-    # is not settled yet. A settled reboot followed by a new pending reboot needs a new step and approval.
+    # True when the latest install or reboot step in the VM's current round was started and is not settled
+    # yet (no final result, no review): only such a step is observed again. A settled step (e.g. a failed
+    # install, a confirmed reboot) followed by another install or reboot needs a new step and a new approval.
     param($VMRecord, [string]$Action)
     $step = Get-PatchLatestStep -VMRecord $VMRecord -Action $Action
-    if ($null -eq $step -or -not [bool]$step.startAttempted) { return $false }
-    if ($Action -eq 'Reboot') { return (-not (Test-PatchMutatingStepReconciled -Step $step)) }
-    return $true
+    if ($null -eq $step) { return $false }
+    return (-not (Test-PatchMutatingStepReconciled -Step $step))
 }
 
 function Test-PatchInstallDone {
