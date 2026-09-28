@@ -105,5 +105,7 @@ Before production use:
 9. With a list that mixes domain VMs and a DMZ VM, confirm the **Account group** column and that one credential is asked per domain and one for the DMZ VM.
 10. Confirm that the guest account runs the agent with full administrator rights through Guest Operations: the first Install must report per-update results, not an access-denied error. With UAC, a local administrator other than the built-in Administrator may get a restricted token (not verified yet).
 11. With **Ignore ESXi certificates for file transfers** unchecked, confirm that file transfers work. The Windows `curl.exe` also checks certificate revocation, which may fail for internal ESXi/VMCA certificates (curl exit code 35 in `errors.log`; not verified yet).
+12. Confirm the guest policies let the agent run: a Group Policy execution policy of `AllSigned` overrides `-ExecutionPolicy Bypass` (the step ends as NeedsReview without `status.json`), and Constrained Language Mode or AppLocker blocks the cluster check (every VM shows cluster state `Unknown`).
+13. From the control workstation, confirm name resolution of the ESXi hosts and HTTPS (port 443) to them; file transfers go directly to the host that runs the VM.
 
 Do not use a production VM for the first pilot. Cluster members and VMs with an unknown cluster state remain blocked for install and reboot.
