@@ -32,6 +32,7 @@ $script:Wizard = @{
     BaseFont = $null
     BaseLayout = @{}
     Stretch = @{}
+    OutlineSizing = $null
 }
 
 $savedPreference = $ErrorActionPreference
@@ -977,13 +978,13 @@ function Set-WizardGridMinimumWidths {
 }
 
 function Update-WizardScale {
-    # Zooms the window content (positions, sizes, fonts, tabs) live with the window by the smaller of the
+    # Zooms the window content (positions, sizes, fonts, tabs) with the window by the smaller of the
     # width and height ratios to the first shown size. Always computed from that reference, so
     # repeated resizing does not drift.
     $form = $script:Wizard.Form
     if ($script:Wizard.BaseLayout.Count -eq 0 -or $form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) { return }
     $factor = [Math]::Min($form.ClientSize.Width / $script:Wizard.BaseClientSize.Width, $form.ClientSize.Height / $script:Wizard.BaseClientSize.Height)
-    # Fonts are recreated only when the size changes by a visible step (0.25 pt), which keeps dragging smooth.
+    # Fonts are recreated only when the size changes by a visible step (0.25 pt).
     $fontSize = [float]([Math]::Round($script:Wizard.BaseFont.Size * $factor * 4) / 4)
     if ($fontSize -ne $form.Font.Size) {
         $form.Font = New-Object System.Drawing.Font($script:Wizard.BaseFont.FontFamily, $fontSize)
@@ -1024,6 +1025,31 @@ function Initialize-WizardUi {
     Import-Module -Name 'VMware.VimAutomation.Core' -ErrorAction Stop
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
+    # Resizing the window shows only its outline, so the content is zoomed once, when the mouse button is
+    # released. Windows has no per-window option for this: the system setting "show window contents while
+    # dragging" is turned off for the duration of the resize loop only (not saved) and then restored.
+    if (-not ('PatchWizardOutlineSizing' -as [type])) {
+        # The class has no public members besides the constructor, which Add-Type reports as a warning.
+        Add-Type -ReferencedAssemblies System.Windows.Forms -WarningAction SilentlyContinue -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+public class PatchWizardOutlineSizing : NativeWindow {
+    [DllImport("user32.dll")] static extern bool SystemParametersInfo(int action, int uiParam, ref int pvParam, int winIni);
+    [DllImport("user32.dll")] static extern bool SystemParametersInfo(int action, int uiParam, IntPtr pvParam, int winIni);
+    const int WM_SYSCOMMAND = 0x0112, SC_SIZE = 0xF000, SPI_SETDRAGFULLWINDOWS = 0x0025, SPI_GETDRAGFULLWINDOWS = 0x0026;
+    public PatchWizardOutlineSizing(Form form) { AssignHandle(form.Handle); }
+    protected override void WndProc(ref Message m) {
+        if (m.Msg != WM_SYSCOMMAND || ((int)m.WParam & 0xFFF0) != SC_SIZE) { base.WndProc(ref m); return; }
+        int dragFull = 0;
+        SystemParametersInfo(SPI_GETDRAGFULLWINDOWS, 0, ref dragFull, 0);
+        SystemParametersInfo(SPI_SETDRAGFULLWINDOWS, 0, IntPtr.Zero, 0);
+        try { base.WndProc(ref m); }
+        finally { SystemParametersInfo(SPI_SETDRAGFULLWINDOWS, dragFull, IntPtr.Zero, 0); }
+    }
+}
+'@
+    }
     [System.Windows.Forms.Application]::EnableVisualStyles()
 
     $form = New-Object System.Windows.Forms.Form
@@ -1384,8 +1410,9 @@ function Initialize-WizardUi {
         Set-WizardGridMinimumWidths
         Save-WizardLayout -Parent $script:Wizard.Form
         Update-WizardStatusLayout
+        $script:Wizard.OutlineSizing = New-Object PatchWizardOutlineSizing($script:Wizard.Form)
     })
-    # Live zoom while the window is dragged, maximized or restored; every tab behaves the same.
+    # Zoom when the size changes: after a resize drag (outline only) ends, on maximize and on restore.
     $form.Add_Resize({ Update-WizardScale })
     # A hidden tab page gets its new size only when shown, so place its content again then.
     $tabs.Add_SelectedIndexChanged({

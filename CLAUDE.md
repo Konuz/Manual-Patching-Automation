@@ -51,7 +51,7 @@ Key design points that span files:
 - **Reboot**: baseline boot time saved before sending, reboot sent once, confirmed only by a newer boot time (`Wait-PatchReboot`). A reboot that was sent (`startAttempted`) but not confirmed stops later reboot batches; any other failure affects only its own VM. Cluster members (last agent status not `NotMember`) are skipped as `ExcludedCluster` before install or reboot.
 - **Certificate options are independent**: the vCenter option only sets PowerCLI `InvalidCertificateAction` for the session; the ESXi option only adds `--insecure` to `curl.exe`. All guest file transfers (including the boot-time read) go through `curl.exe` – do not use `Invoke-VMScript`/`Copy-VMGuestFile`, whose ESXi transfer follows the vCenter option.
 - **Concurrency**: VMs are processed in batches (scan/install concurrency, reboot batch size): start every VM in the batch, then wait for each.
-- **GUI zoom**: `Save-WizardLayout` remembers all control bounds at first show; `Update-WizardScale` (on every resize and tab switch) sets bounds = reference × factor plus stretch rules from `$script:Wizard.Stretch`, and scales fonts. Do not add WinForms anchors – they fight this layout.
+- **GUI zoom**: `Save-WizardLayout` remembers all control bounds at first show; `Update-WizardScale` (on every resize and tab switch) sets bounds = reference × factor plus stretch rules from `$script:Wizard.Stretch`, and scales fonts. Do not add WinForms anchors – they fight this layout. Resizing by dragging shows only the outline: `PatchWizardOutlineSizing` (C# via `Add-Type`, attached in `Shown`) turns off `SPI_SETDRAGFULLWINDOWS` for the duration of the `SC_SIZE` loop only, so the zoom runs once, on release.
 
 ## Gotchas
 
