@@ -479,8 +479,8 @@ function Get-PatchStep {
     for ($index = $steps.Count - 1; $index -ge 0; $index--) {
         $step = $steps[$index]
         if ([string]::Equals([string](Get-PatchValue $step @('action') ''), $Action, [System.StringComparison]::OrdinalIgnoreCase) -and [int](Get-PatchValue $step @('round') 0) -eq $Round) {
-            # A confirmed or reviewed reboot is finished; another pending reboot in the same round needs a new step.
-            if ($Action -eq 'Reboot' -and [string](Get-PatchValue $step @('status') '') -in @('Confirmed', 'Reviewed')) { break }
+            # A confirmed, reviewed or failed reboot is finished; another pending reboot in the same round needs a new step.
+            if ($Action -eq 'Reboot' -and [string](Get-PatchValue $step @('status') '') -in @('Confirmed', 'Reviewed', 'Failed')) { break }
             return $step
         }
     }
@@ -502,7 +502,8 @@ function Test-PatchMutatingStepReconciled {
     param($Step)
     if (-not [bool](Get-PatchValue $Step @('startAttempted') $false)) { return $true }
     $status = [string](Get-PatchValue $Step @('status') '')
-    if ([string](Get-PatchValue $Step @('action') '') -eq 'Reboot') { return ($status -in @('Confirmed', 'Reviewed')) }
+    # A failed reboot is the agent's final answer: it did not restart the guest (cluster member or shutdown.exe error).
+    if ([string](Get-PatchValue $Step @('action') '') -eq 'Reboot') { return ($status -in @('Confirmed', 'Reviewed', 'Failed')) }
     return ($status -in @('Completed', 'CompletedWithErrors', 'Failed', 'Reviewed'))
 }
 
