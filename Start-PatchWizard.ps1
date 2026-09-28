@@ -145,6 +145,7 @@ function Save-WizardSelections {
         $vmName = [string](Get-PatchValue $vm @('vmName') '')
         $rows = @($script:Wizard.UpdateRows | Where-Object { $_.VmName -eq $vmName })
         $selected = @()
+        $deselected = @()
         foreach ($row in $rows) {
             $record = $row.Update
             $key = Get-WizardSelectedUpdateKey -Update $record
@@ -158,13 +159,15 @@ function Save-WizardSelections {
                 Set-PatchValue -InputObject $record -Name 'selected' -Value $true
             }
             else {
+                if ($null -ne $key) { $deselected += $key }
                 Set-PatchValue -InputObject $record -Name 'selected' -Value $false
             }
         }
         Set-PatchValue -InputObject $vm -Name 'selectedUpdates' -Value @($selected)
         $savedCount += $selected.Count
-        # A VM without offered updates (e.g. not scanned yet) keeps the default: all updates preselected.
-        Set-PatchValue -InputObject $vm -Name 'selectionSaved' -Value ($rows.Count -gt 0)
+        # Only what the operator unchecked is remembered: every other offered update, also one offered by a
+        # later scan, stays preselected (plan).
+        Set-PatchValue -InputObject $vm -Name 'deselectedUpdates' -Value @($deselected)
     }
 
     Write-PatchRun -RunPath $script:Wizard.RunPath -RunState $script:Wizard.RunState | Out-Null
@@ -200,6 +203,7 @@ function New-WizardRun {
         $script:Wizard.RunPath = [string](Get-PatchValue $script:Wizard.RunState @('runPath') '')
         $script:Wizard.VCenterCredentials = @{}
         $script:Wizard.GuestCredentials = @{}
+        $script:Wizard.UpdateRows = @()
         $script:Wizard.Controls.OpenLogs.Enabled = $true
         $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}{1}The run keeps the settings it was created with; edited fields apply only to a New patch run.' -f $script:Wizard.RunPath, [Environment]::NewLine)
         Set-WizardStatus -Message ('Run {0} has been created. Go to the Scan tab and start the scan.' -f [string](Get-PatchValue $script:Wizard.RunState @('runId') ''))
@@ -258,6 +262,7 @@ function Resume-WizardRun {
         # Credentials are never saved; they are asked for again when the next action starts.
         $script:Wizard.VCenterCredentials = @{}
         $script:Wizard.GuestCredentials = @{}
+        $script:Wizard.UpdateRows = @()
         Set-WizardSettingsFromRun -RunState $state
         $script:Wizard.Controls.OpenLogs.Enabled = $true
         $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}{1}The run keeps the settings it was created with; edited fields apply only to a New patch run.' -f $script:Wizard.RunPath, [Environment]::NewLine)
@@ -298,19 +303,17 @@ function Open-WizardLogs {
 function Get-WizardUpdateRowsFromState {
     $rows = @()
     if ($null -eq $script:Wizard.RunState) { return @() }
+    # A choice made in the grid but not saved yet survives the refresh after an action.
+    $shown = @{}
+    foreach ($row in @($script:Wizard.UpdateRows)) { $shown[$row.VmName + '|' + $row.Key] = [bool]$row.Selected }
     foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
         $vmName = [string](Get-PatchValue $vm @('vmName') '')
         $updates = @(Get-PatchArray (Get-PatchValue $vm @('availableUpdates') @()))
-        $savedSelection = [bool](Get-PatchValue $vm @('selectionSaved') $false)
-        $savedKeys = @{}
-        foreach ($selectedUpdate in @(Get-PatchArray (Get-PatchValue $vm @('selectedUpdates') @()))) {
-            $savedKey = Get-WizardSelectedUpdateKey -Update $selectedUpdate
-            if ($null -ne $savedKey) { $savedKeys[$savedKey] = $true }
-        }
+        $deselected = @(Get-PatchArray (Get-PatchValue $vm @('deselectedUpdates') @()))
         foreach ($update in $updates) {
             $key = Get-WizardSelectedUpdateKey -Update $update
             if ($null -eq $key) { continue }
-            $selected = if ($savedSelection) { $savedKeys.ContainsKey($key) } else { $true }
+            $selected = if ($shown.ContainsKey($vmName + '|' + $key)) { $shown[$vmName + '|' + $key] } else { $key -notin $deselected }
             $rows += [pscustomobject]@{
                 VmName = $vmName
                 VmRecord = $vm
@@ -770,7 +773,7 @@ function Start-WizardNewRound {
             Set-PatchValue -InputObject $vm -Name 'currentRound' -Value $round
             Set-PatchValue -InputObject $vm -Name 'availableUpdates' -Value @()
             Set-PatchValue -InputObject $vm -Name 'selectedUpdates' -Value @()
-            Set-PatchValue -InputObject $vm -Name 'selectionSaved' -Value $false
+            Set-PatchValue -InputObject $vm -Name 'deselectedUpdates' -Value @()
             Set-PatchValue -InputObject $vm -Name 'pendingUpdates' -Value @()
             Set-PatchValue -InputObject $vm -Name 'reboot' -Value ([pscustomobject]@{ status = 'NotRequested'; required = $false; confirmedBootTime = $null })
             # A skipped guest account stays skipped for the rest of the run.
