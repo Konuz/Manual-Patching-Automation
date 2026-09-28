@@ -943,6 +943,7 @@ function Add-PatchVmResult {
     # A skip that only means "nothing to do in this step" keeps the VM's last real result as its status.
     if ($status -notin @('SkippedNoSelection', 'SkippedNoReboot', 'SkippedInstalledThisRound')) { Set-PatchValue -InputObject $VMRecord -Name 'status' -Value $status }
     Set-PatchValue -InputObject $VMRecord -Name 'lastProcessedAction' -Value $Action
+    Set-PatchValue -InputObject $VMRecord -Name 'lastResult' -Value $status
     $agentStatus = Get-PatchValue $Result @('agentStatus') $null
     if ($null -ne $agentStatus) { Set-PatchValue -InputObject $VMRecord -Name 'agentStatus' -Value ($agentStatus | Select-Object -Property * -ExcludeProperty updates) }
 
@@ -1211,8 +1212,12 @@ function Invoke-PatchAction {
             }
         }
 
-        $needsReview = @($resultRows | Where-Object { $_.status -in @('NeedsReview', 'PendingRebootConfirmation', 'PendingRebootBarrier', 'SkippedUnreviewedStep') }).Count -gt 0
-        $hasErrors = @($resultRows | Where-Object { $_.status -in @('Failed', 'CompletedWithErrors', 'GuestCredentialRejected') -or -not [string]::IsNullOrWhiteSpace([string]$_.error) }).Count -gt 0
+        # After a Retry for some VMs, the others keep their result of this step in the run status.
+        $processedNames = @($vmRecords | ForEach-Object { [string]$_.vmName })
+        $statusRows = @($resultRows) + @(Get-PatchArray $run.vms | Where-Object { $processedNames -notcontains [string]$_.vmName -and [string](Get-PatchValue $_ @('lastProcessedAction') '') -eq $Action } |
+                ForEach-Object { [pscustomobject]@{ status = [string](Get-PatchValue $_ @('lastResult') ''); error = '' } })
+        $needsReview = @($statusRows | Where-Object { $_.status -in @('NeedsReview', 'PendingRebootConfirmation', 'PendingRebootBarrier', 'SkippedUnreviewedStep') }).Count -gt 0
+        $hasErrors = @($statusRows | Where-Object { $_.status -in @('Failed', 'CompletedWithErrors', 'GuestCredentialRejected') -or -not [string]::IsNullOrWhiteSpace([string]$_.error) }).Count -gt 0
         if ($needsReview) { Set-PatchValue -InputObject $run -Name 'status' -Value 'NeedsReview' }
         elseif ($hasErrors) { Set-PatchValue -InputObject $run -Name 'status' -Value 'CompletedWithErrors' }
         else { Set-PatchValue -InputObject $run -Name 'status' -Value 'Completed' }
