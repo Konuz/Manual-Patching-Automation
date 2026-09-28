@@ -583,9 +583,10 @@ function Test-PatchStepStarted {
 
 function Test-PatchInstallDone {
     # Plan: one installation per round; updates found later (e.g. by Verify) need a new round and selection.
+    # A failed install (the agent reported it, e.g. Windows Update search or download failed) may be approved again.
     param($VMRecord)
     $step = Get-PatchLatestStep -VMRecord $VMRecord -Action 'Install'
-    return ($null -ne $step -and [string]$step.status -in @('Completed', 'CompletedWithErrors', 'Failed', 'Reviewed'))
+    return ($null -ne $step -and [string]$step.status -in @('Completed', 'CompletedWithErrors', 'Reviewed'))
 }
 
 function Get-PatchClusterMembership {
@@ -744,8 +745,9 @@ function Invoke-PatchAgentStep {
     $stepStatus = [string]$step.status
     $readOnly = $Action -in @('Scan', 'Verify')
     if ($stepStatus -in @('Completed', 'CompletedWithErrors', 'Failed', 'Reviewed') -or ($readOnly -and $stepStatus -eq 'NeedsReview')) {
-        # A finished install is never repeated in the same round; a new round starts a new step.
-        if ($Action -eq 'Install') {
+        # A finished install is never repeated in the same round; a new round starts a new step. After a failed
+        # install a new approval starts a new step.
+        if ($Action -eq 'Install' -and $stepStatus -ne 'Failed') {
             # Invoke-PatchAction already skips such a VM (Test-PatchInstallDone); this keeps the rule at the step itself.
             return [pscustomobject]@{ status = $stepStatus; step = $step; agentStatus = $null; error = $step.error }
         }
