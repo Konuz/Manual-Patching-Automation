@@ -437,7 +437,6 @@ function New-PatchStep {
         startAttempted = $false
         processId = $null
         startedAt = $null
-        deadlineAt = $null
         finishedAt = $null
         baselineBootTime = $null
         error = $null
@@ -632,13 +631,10 @@ function Wait-PatchAgent {
     $mode = [string]$Step.agentMode
     $localStatusPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step).status
     $ignoreEsxi = Test-PatchIgnoreEsxi $RunState
-    # The deadline is saved with the step, so a resumed run keeps the original limit.
-    if ([string]::IsNullOrWhiteSpace([string]$Step.deadlineAt)) {
-        $startedAt = [datetime]::Parse([string](Get-PatchValue $Step @('startedAt') (Get-PatchUtcNow))).ToUniversalTime()
-        Set-PatchValue -InputObject $Step -Name 'deadlineAt' -Value $startedAt.AddMinutes($TimeoutMinutes).ToString('o')
-        Save-PatchDecision -RunPath $RunPath -RunState $RunState
-    }
-    $deadline = [datetime]::Parse([string]$Step.deadlineAt).ToUniversalTime()
+    # The limit counts from the agent's start; observing it again after the limit (approving the step again,
+    # Resume run) waits one more full limit.
+    $deadline = [datetime]::Parse([string](Get-PatchValue $Step @('startedAt') (Get-PatchUtcNow))).ToUniversalTime().AddMinutes($TimeoutMinutes)
+    if ($deadline -lt (Get-Date).ToUniversalTime()) { $deadline = (Get-Date).ToUniversalTime().AddMinutes($TimeoutMinutes) }
 
     $lastError = $null
     $agentEnded = $false
@@ -675,9 +671,9 @@ function Wait-PatchAgent {
         if ((Get-Date).ToUniversalTime() -ge $deadline) { break }
         Start-Sleep -Seconds 10
     }
-    $message = 'The guest agent did not report a final result before the time limit.'
+    $message = 'The guest agent did not report a final result before the time limit; it may still be running.'
     if ($null -ne $lastError) { $message += ' Last read error: ' + $lastError }
-    return [pscustomobject]@{ status = 'NeedsReview'; agentStatus = $null; error = $message }
+    return [pscustomobject]@{ status = 'NeedsReview'; agentStatus = $null; error = $message; running = $true }
 }
 
 function Receive-PatchAgentLog {
@@ -785,7 +781,7 @@ function Invoke-PatchAgentStep {
     if ($null -ne $waitResult.error) { Set-PatchValue -InputObject $step -Name 'error' -Value (Protect-PatchText $waitResult.error) }
     if ($waitResult.status -eq 'Completed' -or $waitResult.status -eq 'CompletedWithErrors' -or $waitResult.status -eq 'Failed') { Set-PatchValue -InputObject $step -Name 'finishedAt' -Value (Get-PatchUtcNow) }
     Save-PatchDecision -RunPath $RunPath -RunState $RunState
-    return [pscustomobject]@{ status = $waitResult.status; step = $step; agentStatus = $waitResult.agentStatus; error = $waitResult.error }
+    return [pscustomobject]@{ status = $waitResult.status; step = $step; agentStatus = $waitResult.agentStatus; error = $waitResult.error; running = [bool](Get-PatchValue $waitResult @('running') $false) }
 }
 
 function Wait-PatchReboot {
@@ -920,8 +916,8 @@ function Add-PatchVmResult {
 
     $message = [string](Get-PatchValue $Result @('error') '')
     $level = 'INFO'
-    # A reboot held back by the barrier is not a fault of this VM: its reason goes to run.log as a warning only.
-    if ($status -eq 'PendingRebootBarrier' -and -not [string]::IsNullOrWhiteSpace($message)) { $level = 'WARN' }
+    # A reboot or install held back by another VM is not a fault of this VM: its reason goes to run.log as a warning only.
+    if ($status -in @('PendingRebootBarrier', 'PendingInstallLimit') -and -not [string]::IsNullOrWhiteSpace($message)) { $level = 'WARN' }
     elseif (-not [string]::IsNullOrWhiteSpace($message)) {
         $message = Protect-PatchText $message
         $level = 'ERROR'
@@ -1120,7 +1116,7 @@ function Invoke-PatchAction {
                 }
                 elseif (-not $StartOnly) { $code = 'NeedsReview'; $message = 'The started {0} could not be observed: {1}' -f $Action, $_.Exception.Message }
                 else { $code = 'Failed'; $message = $_.Exception.Message }
-                [pscustomobject]@{ status = $code; error = $message }
+                [pscustomobject]@{ status = $code; error = $message; running = (-not $StartOnly -and $code -eq 'NeedsReview') }
             }
         }
 
@@ -1152,7 +1148,10 @@ function Invoke-PatchAction {
 
         # Reboots already sent but not confirmed are observed first, in batches of their own; until they are
         # confirmed no new reboot is sent (plan: step 5), also when they are not part of this call (Retry).
-        $observed = @($toRun | Where-Object { $Action -eq 'Reboot' -and (Test-PatchStepStarted -VMRecord $_ -Action 'Reboot') })
+        # Installs without a final result are observed first too: one that may still be running holds back the
+        # next install batches, so no more installs run at once than the install concurrency.
+        $observed = @($toRun | Where-Object { $Action -in @('Install', 'Reboot') -and (Test-PatchStepStarted -VMRecord $_ -Action $Action) })
+        $installHold = @()
         $fresh = @($toRun | Where-Object { $observed -notcontains $_ })
         $runNames = @($toRun | ForEach-Object { [string]$_.vmName })
         if ($Action -eq 'Reboot' -and @(Get-PatchArray $run.vms | Where-Object { $runNames -notcontains [string]$_.vmName -and (Test-PatchStepStarted -VMRecord $_ -Action 'Reboot') }).Count -gt 0) {
@@ -1173,6 +1172,11 @@ function Invoke-PatchAction {
                     $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = 'PendingRebootBarrier'; error = $barrierMessage }) -RebootBarrier ([ref]$rebootBarrier)
                     continue
                 }
+                if ($Action -eq 'Install' -and $installHold.Count -gt 0) {
+                    $holdMessage = 'Not started: the install on {0} has no final result and may still be running. Approve Install again to observe it, or check the guest and use Mark steps reviewed.' -f ($installHold -join ', ')
+                    $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result ([pscustomobject]@{ status = 'PendingInstallLimit'; error = $holdMessage }) -RebootBarrier ([ref]$rebootBarrier)
+                    continue
+                }
                 Set-PatchValue -InputObject $vmRecord -Name 'currentAction' -Value $Action
                 $result = & $invokeVm $vmRecord $true
                 if ($result.status -eq 'Started') {
@@ -1186,6 +1190,7 @@ function Invoke-PatchAction {
             }
             foreach ($vmRecord in $started) {
                 $result = & $invokeVm $vmRecord $false
+                if ($Action -eq 'Install' -and [bool](Get-PatchValue $result @('running') $false)) { $installHold += [string]$vmRecord.vmName }
                 $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result $result -RebootBarrier ([ref]$rebootBarrier)
             }
         }
@@ -1194,7 +1199,7 @@ function Invoke-PatchAction {
         $processedNames = @($vmRecords | ForEach-Object { [string]$_.vmName })
         $statusRows = @($resultRows) + @(Get-PatchArray $run.vms | Where-Object { $processedNames -notcontains [string]$_.vmName -and [string](Get-PatchValue $_ @('lastProcessedAction') '') -eq $Action } |
                 ForEach-Object { [pscustomobject]@{ status = [string](Get-PatchValue $_ @('lastResult') ''); error = '' } })
-        $needsReview = @($statusRows | Where-Object { $_.status -in @('NeedsReview', 'PendingRebootConfirmation', 'PendingRebootBarrier', 'SkippedUnreviewedStep') }).Count -gt 0
+        $needsReview = @($statusRows | Where-Object { $_.status -in @('NeedsReview', 'PendingRebootConfirmation', 'PendingRebootBarrier', 'PendingInstallLimit', 'SkippedUnreviewedStep') }).Count -gt 0
         $hasErrors = @($statusRows | Where-Object { $_.status -in @('Failed', 'CompletedWithErrors', 'GuestCredentialRejected') -or -not [string]::IsNullOrWhiteSpace([string]$_.error) }).Count -gt 0
         if ($needsReview) { Set-PatchValue -InputObject $run -Name 'status' -Value 'NeedsReview' }
         elseif ($hasErrors) { Set-PatchValue -InputObject $run -Name 'status' -Value 'CompletedWithErrors' }

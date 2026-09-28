@@ -1144,7 +1144,7 @@ function Initialize-WizardUi {
         @($installConcurrencyLabel, $installConcurrency, 'How many VMs install updates at the same time. Default: 3.'),
         @($rebootBatchLabel, $rebootBatch, 'How many VMs are restarted together. The next batch starts only after every VM in this batch reports a newer boot time. Default: 1.'),
         @($scanLimitLabel, $scanLimit, 'Maximum minutes to wait for one VM scan. After that the VM is marked NeedsReview. Default: 30.'),
-        @($installLimitLabel, $installLimit, 'Maximum minutes to wait for installation on one VM. After that the VM is marked NeedsReview; the installation is never started again automatically. Default: 180.'),
+        @($installLimitLabel, $installLimit, 'Maximum minutes to wait for installation on one VM. After that the VM is marked NeedsReview and later install batches wait, since it may still be running; the installation is never started again automatically. Default: 180.'),
         @($rebootLimitLabel, $rebootLimit, 'Maximum minutes to wait for a newer boot time and running VMware Tools after a reboot. Without confirmation, later reboot batches are stopped. Default: 30.')
     )
     foreach ($hint in $hints) {
