@@ -991,7 +991,7 @@ function Initialize-WizardUi {
     $form.StartPosition = 'CenterScreen'
     $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
     $form.MinimumSize = New-Object System.Drawing.Size(800, 540)
-    $form.Size = New-Object System.Drawing.Size(1250, 820)
+    $form.Size = New-Object System.Drawing.Size(1250, 900)
     $form.Padding = New-Object System.Windows.Forms.Padding(8)
     $script:Wizard.Form = $form
 
@@ -1144,9 +1144,15 @@ function Initialize-WizardUi {
     $scanButton.Dock = [System.Windows.Forms.DockStyle]::Top
     $scanButton.Height = 34
     $scanButton.Add_Click({ Start-WizardAction -Action Scan })
-    $vmGrid = New-WizardGrid -Headers @('VM', 'Expected FQDN', 'Status', 'Current action', 'Offered updates', 'Reboot', 'Cluster', 'Errors', 'Account group') -Widths @(170, 200, 135, 110, 95, 115, 90, 55, 150)
-    $scanTab.Controls.Add($vmGrid)
+    $scanHint = New-WizardLabel -Text 'The scan reports the offered updates, a pending reboot and the cluster membership of each VM. Every step shows the VM table below the tabs.' -X 12 -Y 48 -Width 1050 -Height 35
+    $scanHint.ForeColor = [System.Drawing.Color]::DimGray
+    $scanTab.Controls.Add($scanHint)
     $scanTab.Controls.Add($scanButton)
+    # The VM table sits below the tabs, so each step (except Settings) shows the VMs and their results.
+    $vmGrid = New-WizardGrid -Headers @('VM', 'Expected FQDN', 'Status', 'Current action', 'Offered updates', 'Reboot', 'Cluster', 'Errors', 'Account group') -Widths @(170, 200, 135, 110, 95, 115, 90, 55, 150)
+    $vmGrid.Dock = [System.Windows.Forms.DockStyle]::Bottom
+    $vmGrid.Height = 190
+    $vmGrid.Visible = $false
     [void]$tabs.TabPages.Add($scanTab)
 
     $selectTab = New-Object System.Windows.Forms.TabPage
@@ -1283,8 +1289,10 @@ function Initialize-WizardUi {
     $statusText.ReadOnly = $true
     $statusPanel.Controls.AddRange(@($statusLabel, $progressLabel, $progress, $statusText))
     $form.Controls.Add($statusPanel)
-    $form.Controls.SetChildIndex($header, 2)
-    $form.Controls.SetChildIndex($statusPanel, 1)
+    $form.Controls.Add($vmGrid)
+    $form.Controls.SetChildIndex($header, 3)
+    $form.Controls.SetChildIndex($statusPanel, 2)
+    $form.Controls.SetChildIndex($vmGrid, 1)
     $form.Controls.SetChildIndex($tabs, 0)
 
     $script:Wizard.Controls = @{
@@ -1337,7 +1345,10 @@ function Initialize-WizardUi {
     # Live zoom while the window is dragged, maximized or restored; every tab behaves the same.
     $form.Add_Resize({ Update-WizardScale })
     # A hidden tab page gets its new size only when shown, so place its content again then.
-    $tabs.Add_SelectedIndexChanged({ Update-WizardScale })
+    $tabs.Add_SelectedIndexChanged({
+        $script:Wizard.Controls.VmGrid.Visible = ($script:Wizard.Tabs.SelectedIndex -ne 0)
+        Update-WizardScale
+    })
 
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 500
