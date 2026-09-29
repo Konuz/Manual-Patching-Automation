@@ -48,7 +48,7 @@ The groups are shown in the **Account group** column and saved in `run.json`; th
 
 ## Operator workflow
 
-The wizard presents six steps. Actions that can change a guest require a separate explicit approval in the corresponding step. Below the tabs, every step except Settings shows the VM table (status, current action, offered updates, reboot, cluster membership, errors, account group). The window content (fields, buttons, fonts, tabs) scales with the window size.
+The wizard presents six steps. Actions that can change a guest require a separate explicit approval in the corresponding step. Below the tabs, every step except Settings shows the VM table (status, current action, offered updates, reboot, cluster membership, errors, account group). The window content (fields, buttons, fonts, tabs) scales with the window size. Clicking a column header of any list sorts it A-Z, a second click Z-A, and a third click restores the original order; rows with equal values keep their original order, and a sorted VM table stays sorted while statuses change.
 
 1. **Settings** — choose the vCenter(s), VM entries, run folder, and concurrency. Create a new run or choose **Resume run**.
 2. **Scan** — start the scan. The guest reports offered updates, pending reboot state, and cluster membership (the **Cluster** column: `NotMember`, `Member` or `Unknown`; an unknown state is also written to `errors.log`).

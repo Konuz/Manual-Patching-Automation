@@ -29,6 +29,7 @@ $script:Wizard = @{
     UpdateRows = @()
     KbGroups = @()
     UpdatingSelection = $false
+    GridSort = @{}
     Controls = @{}
     BaseClientSize = $null
     BaseFont = $null
@@ -356,7 +357,8 @@ function Refresh-WizardSelectionGrid {
     $grid = $script:Wizard.Controls.SelectGrid
     $script:Wizard.UpdateRows = @(Get-WizardUpdateRowsFromState)
     $grid.Rows.Clear()
-    foreach ($row in $script:Wizard.UpdateRows) {
+    for ($i = 0; $i -lt $script:Wizard.UpdateRows.Count; $i++) {
+        $row = $script:Wizard.UpdateRows[$i]
         $record = $row.Update
         $type = [string](Get-PatchValue $record @('type') 'Unknown')
         $browseOnly = [bool](Get-PatchValue $record @('browseOnly') $false)
@@ -369,12 +371,13 @@ function Refresh-WizardSelectionGrid {
         $index = $grid.Rows.Add([bool]$row.Selected,
             $row.VmName,
             [string](Get-PatchValue $record @('updateId') ''),
-            [string](Get-PatchValue $record @('revisionNumber') ''),
+            [int64](Get-PatchValue $record @('revisionNumber') 0),
             [string](Get-PatchValue $record @('title') ''),
             $type,
             $labelText)
-        $grid.Rows[$index].Tag = $row
+        $grid.Rows[$index].Tag = $i
     }
+    Set-WizardGridSort -Grid $grid
     Refresh-WizardKbGrid
 }
 
@@ -409,18 +412,20 @@ function Refresh-WizardKbGrid {
     $grid = $script:Wizard.Controls.KbGrid
     $script:Wizard.KbGroups = @(Get-WizardKbGroups)
     $grid.Rows.Clear()
-    foreach ($group in $script:Wizard.KbGroups) {
+    for ($i = 0; $i -lt $script:Wizard.KbGroups.Count; $i++) {
+        $group = $script:Wizard.KbGroups[$i]
         $kbText = if ($group.Kb) { $group.Kb } else { '(no KB)' }
         $vmCount = @($group.RowIndexes | ForEach-Object { $script:Wizard.UpdateRows[$_].VmName } | Select-Object -Unique).Count
-        [void]$grid.Rows.Add((Get-WizardKbGroupState -Group $group), $kbText, $group.Title, (@($group.OsNames | Sort-Object) -join ', '), $vmCount)
+        $index = $grid.Rows.Add((Get-WizardKbGroupState -Group $group), $kbText, $group.Title, (@($group.OsNames | Sort-Object) -join ', '), $vmCount)
+        $grid.Rows[$index].Tag = $i
     }
+    Set-WizardGridSort -Grid $grid
 }
 
 function Update-WizardKbGridStates {
-    # Only the check boxes change, so the operator keeps the scroll position.
-    $grid = $script:Wizard.Controls.KbGrid
-    for ($i = 0; $i -lt $script:Wizard.KbGroups.Count; $i++) {
-        $grid.Rows[$i].Cells[0].Value = Get-WizardKbGroupState -Group $script:Wizard.KbGroups[$i]
+    # Only the check boxes change (no re-sort), so rows do not move under the operator's cursor.
+    foreach ($gridRow in $script:Wizard.Controls.KbGrid.Rows) {
+        $gridRow.Cells[0].Value = Get-WizardKbGroupState -Group $script:Wizard.KbGroups[[int]$gridRow.Tag]
     }
 }
 
@@ -429,12 +434,15 @@ function Set-WizardKbGroupSelected {
     param([int]$Index)
     $group = $script:Wizard.KbGroups[$Index]
     $selected = (Get-WizardKbGroupState -Group $group) -ne [System.Windows.Forms.CheckState]::Checked
-    $selectGrid = $script:Wizard.Controls.SelectGrid
+    $indexes = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($rowIndex in $group.RowIndexes) {
+        [void]$indexes.Add($rowIndex)
+        $script:Wizard.UpdateRows[$rowIndex].Selected = $selected
+    }
     $script:Wizard.UpdatingSelection = $true
     try {
-        foreach ($rowIndex in $group.RowIndexes) {
-            $script:Wizard.UpdateRows[$rowIndex].Selected = $selected
-            $selectGrid.Rows[$rowIndex].Cells[0].Value = $selected
+        foreach ($gridRow in $script:Wizard.Controls.SelectGrid.Rows) {
+            if ($indexes.Contains([int]$gridRow.Tag)) { $gridRow.Cells[0].Value = $selected }
         }
     }
     finally { $script:Wizard.UpdatingSelection = $false }
@@ -450,26 +458,30 @@ function Refresh-WizardVmGrid {
     try {
         if ($grid.Rows.Count -ne $vms.Count) {
             $grid.Rows.Clear()
-            foreach ($vm in $vms) {
-                [void]$grid.Rows.Add('', '', '', '', '', '', '', '', '')
+            for ($i = 0; $i -lt $vms.Count; $i++) {
+                # Counts are numbers so that they sort as numbers.
+                $index = $grid.Rows.Add('', '', '', '', 0, '', '', 0, '')
+                $grid.Rows[$index].Tag = $i
             }
         }
-        for ($i = 0; $i -lt $vms.Count; $i++) {
-            $vm = $vms[$i]
+        foreach ($gridRow in $grid.Rows) {
+            $vm = $vms[[int]$gridRow.Tag]
             $updates = @(Get-PatchArray (Get-PatchValue $vm @('availableUpdates') @()))
             $reboot = Get-PatchValue $vm @('reboot') $null
-            $grid.Rows[$i].Cells[0].Value = [string](Get-PatchValue $vm @('vmName') '')
-            $grid.Rows[$i].Cells[1].Value = [string](Get-PatchValue $vm @('expectedFqdn') '')
-            $grid.Rows[$i].Cells[2].Value = [string](Get-PatchValue $vm @('status') 'Pending')
-            $grid.Rows[$i].Cells[3].Value = [string](Get-PatchValue $vm @('currentAction') '')
-            $grid.Rows[$i].Cells[4].Value = [string]$updates.Count
-            $grid.Rows[$i].Cells[5].Value = [string](Get-PatchValue $reboot @('status') 'NotRequested')
+            $gridRow.Cells[0].Value = [string](Get-PatchValue $vm @('vmName') '')
+            $gridRow.Cells[1].Value = [string](Get-PatchValue $vm @('expectedFqdn') '')
+            $gridRow.Cells[2].Value = [string](Get-PatchValue $vm @('status') 'Pending')
+            $gridRow.Cells[3].Value = [string](Get-PatchValue $vm @('currentAction') '')
+            $gridRow.Cells[4].Value = $updates.Count
+            $gridRow.Cells[5].Value = [string](Get-PatchValue $reboot @('status') 'NotRequested')
             # Cluster membership from the last agent status; empty until the VM is scanned.
-            $grid.Rows[$i].Cells[6].Value = $(if ($null -eq (Get-PatchValue $vm @('agentStatus') $null)) { '' } else { Get-PatchClusterMembership -VMRecord $vm })
+            $gridRow.Cells[6].Value = $(if ($null -eq (Get-PatchValue $vm @('agentStatus') $null)) { '' } else { [string](Get-PatchClusterMembership -VMRecord $vm) })
             $errors = @(Get-PatchArray (Get-PatchValue $vm @('errors') @()))
-            $grid.Rows[$i].Cells[7].Value = [string]$errors.Count
-            $grid.Rows[$i].Cells[8].Value = [string](Get-PatchValue $vm @('accountGroup') '')
+            $gridRow.Cells[7].Value = $errors.Count
+            $gridRow.Cells[8].Value = [string](Get-PatchValue $vm @('accountGroup') '')
         }
+        # Statuses change during an action, so an active sort is applied again (equal values keep their order).
+        if ($null -ne $script:Wizard.GridSort[$grid]) { Set-WizardGridSort -Grid $grid }
     }
     finally {
         $script:Wizard.UpdatingGrid = $false
@@ -490,14 +502,17 @@ function Refresh-WizardRebootGrid {
     $grid = $script:Wizard.Controls.RebootGrid
     if ($null -eq $grid) { return }
     $grid.Rows.Clear()
-    foreach ($vm in @(Get-WizardPendingRebootVms)) {
+    $pending = @(Get-WizardPendingRebootVms)
+    for ($i = 0; $i -lt $pending.Count; $i++) {
+        $vm = $pending[$i]
         $index = $grid.Rows.Add(
             [string](Get-PatchValue $vm @('vmName') ''),
             [string](Get-PatchValue $vm @('expectedFqdn') ''),
             [string](Get-PatchValue $vm @('status') 'Pending'),
             [string](Get-PatchValue (Get-PatchValue $vm @('agentStatus') $null) @('outcome') 'Pending reboot'))
-        $grid.Rows[$index].Tag = $vm
+        $grid.Rows[$index].Tag = $i
     }
+    Set-WizardGridSort -Grid $grid
     $script:Wizard.Controls.RebootButton.Enabled = ($grid.Rows.Count -gt 0 -and $null -eq $script:Wizard.ActivePowerShell)
 }
 
@@ -999,6 +1014,32 @@ function Set-WizardGridScaling {
     $Grid.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::AutoSize
     # Header text stays on one line (see Set-WizardGridMinimumWidths for the scroll bar).
     $Grid.ColumnHeadersDefaultCellStyle.WrapMode = [System.Windows.Forms.DataGridViewTriState]::False
+    # A header click sorts A-Z, then Z-A, then back to the source order (see Switch-WizardGridSort).
+    $Grid.Add_ColumnHeaderMouseClick({
+        param($sender, $eventArgs)
+        Switch-WizardGridSort -Grid $sender -Column $eventArgs.ColumnIndex
+    })
+}
+
+function Set-WizardGridSort {
+    # Applies the grid's current sort; rows carry their source index in Tag.
+    param([System.Windows.Forms.DataGridView]$Grid)
+    $sort = $script:Wizard.GridSort[$Grid]
+    if ($null -eq $sort) { $Grid.Sort((New-Object PatchWizardRowComparer(-1, $false))) }
+    else { $Grid.Sort((New-Object PatchWizardRowComparer($sort.Column, $sort.Descending))) }
+    foreach ($column in $Grid.Columns) {
+        $column.HeaderCell.SortGlyphDirection = if ($null -eq $sort -or $sort.Column -ne $column.Index) { [System.Windows.Forms.SortOrder]::None }
+            elseif ($sort.Descending) { [System.Windows.Forms.SortOrder]::Descending } else { [System.Windows.Forms.SortOrder]::Ascending }
+    }
+}
+
+function Switch-WizardGridSort {
+    param([System.Windows.Forms.DataGridView]$Grid, [int]$Column)
+    $sort = $script:Wizard.GridSort[$Grid]
+    if ($null -eq $sort -or $sort.Column -ne $Column) { $script:Wizard.GridSort[$Grid] = @{ Column = $Column; Descending = $false } }
+    elseif (-not $sort.Descending) { $sort.Descending = $true }
+    else { $script:Wizard.GridSort.Remove($Grid) }
+    Set-WizardGridSort -Grid $Grid
 }
 
 function Save-WizardLayout {
@@ -1081,7 +1122,7 @@ function New-WizardGrid {
         $column.HeaderText = $Headers[$i]
         $column.Name = ('Column{0}' -f $i)
         $column.FillWeight = $Widths[$i]
-        $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+        $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic
         [void]$grid.Columns.Add($column)
     }
     return $grid
@@ -1115,6 +1156,31 @@ public class PatchWizardOutlineSizing : NativeWindow {
         SystemParametersInfo(SPI_SETDRAGFULLWINDOWS, 0, IntPtr.Zero, 0);
         try { base.WndProc(ref m); }
         finally { SystemParametersInfo(SPI_SETDRAGFULLWINDOWS, dragFull, IntPtr.Zero, 0); }
+    }
+}
+'@
+    }
+    # Sorts grid rows by one column; equal values (and "no sort", column -1) keep the source order held in
+    # each row's Tag, so a refresh never reshuffles rows with the same value.
+    if (-not ('PatchWizardRowComparer' -as [type])) {
+        Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @'
+using System;
+using System.Collections;
+using System.Windows.Forms;
+public class PatchWizardRowComparer : IComparer {
+    readonly int column; readonly int direction;
+    public PatchWizardRowComparer(int column, bool descending) { this.column = column; direction = descending ? -1 : 1; }
+    public int Compare(object x, object y) {
+        DataGridViewRow a = (DataGridViewRow)x, b = (DataGridViewRow)y;
+        int result = column < 0 ? 0 : direction * CompareValues(a.Cells[column].Value, b.Cells[column].Value);
+        return result != 0 ? result : ((int)a.Tag).CompareTo((int)b.Tag);
+    }
+    static int CompareValues(object a, object b) {
+        if (a == null) return b == null ? 0 : -1;
+        if (b == null) return 1;
+        string textA = a as string, textB = b as string;
+        if (textA != null && textB != null) return string.Compare(textA, textB, StringComparison.CurrentCultureIgnoreCase);
+        return ((IComparable)a).CompareTo(b);
     }
 }
 '@
@@ -1318,6 +1384,7 @@ public class PatchWizardOutlineSizing : NativeWindow {
     $checkColumn.Name = 'Selected'
     $checkColumn.FillWeight = 65
     $checkColumn.ReadOnly = $false
+    $checkColumn.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic
     [void]$selectGrid.Columns.Add($checkColumn)
     $selectHeaders = @('VM', 'UpdateID', 'Revision', 'Title', 'Type', 'Labels')
     $selectWidths = @(170, 280, 80, 350, 90, 180)
@@ -1327,7 +1394,7 @@ public class PatchWizardOutlineSizing : NativeWindow {
         $column.Name = ('SelectColumn{0}' -f $i)
         $column.FillWeight = $selectWidths[$i]
         $column.ReadOnly = $true
-        $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+        $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic
         [void]$selectGrid.Columns.Add($column)
     }
     $selectGrid.Add_CurrentCellDirtyStateChanged({
@@ -1339,8 +1406,8 @@ public class PatchWizardOutlineSizing : NativeWindow {
         if ($eventArgs.RowIndex -lt 0 -or $eventArgs.ColumnIndex -ne 0) { return }
         if ($script:Wizard.UpdatingSelection) { return }
         if ($eventArgs.RowIndex -lt $script:Wizard.UpdateRows.Count) {
-            $gridControl = $script:Wizard.Controls.SelectGrid
-            $script:Wizard.UpdateRows[$eventArgs.RowIndex].Selected = [bool]$gridControl.Rows[$eventArgs.RowIndex].Cells[0].Value
+            $gridRow = $script:Wizard.Controls.SelectGrid.Rows[$eventArgs.RowIndex]
+            $script:Wizard.UpdateRows[[int]$gridRow.Tag].Selected = [bool]$gridRow.Cells[0].Value
             Update-WizardKbGridStates
             Update-WizardStepState
         }
@@ -1360,6 +1427,7 @@ public class PatchWizardOutlineSizing : NativeWindow {
     $kbCheckColumn.HeaderText = 'All VMs'
     $kbCheckColumn.ThreeState = $true
     $kbCheckColumn.FillWeight = 65
+    $kbCheckColumn.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic
     [void]$kbGrid.Columns.Add($kbCheckColumn)
     $kbHeaders = @('KB', 'Title', 'Operating systems', 'VMs')
     $kbWidths = @(110, 450, 300, 50)
@@ -1367,13 +1435,13 @@ public class PatchWizardOutlineSizing : NativeWindow {
         $column = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
         $column.HeaderText = $kbHeaders[$i]
         $column.FillWeight = $kbWidths[$i]
-        $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+        $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic
         [void]$kbGrid.Columns.Add($column)
     }
     $kbGrid.Add_CellClick({
         param($sender, $eventArgs)
         if ($eventArgs.RowIndex -lt 0 -or $eventArgs.ColumnIndex -ne 0) { return }
-        Set-WizardKbGroupSelected -Index $eventArgs.RowIndex
+        Set-WizardKbGroupSelected -Index ([int]$script:Wizard.Controls.KbGrid.Rows[$eventArgs.RowIndex].Tag)
     })
     $perVmLabel = New-WizardLabel -Text 'Per VM:' -X 8 -Y 0 -Width 1000 -Height 22
     $perVmLabel.Dock = [System.Windows.Forms.DockStyle]::Top
