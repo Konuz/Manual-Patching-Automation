@@ -250,8 +250,8 @@ try {
         $wuaResult = [pscustomobject]@{ ResultCode = 2; HResult = 0; RebootRequired = $false }
         $wuaResult | Add-Member ScriptMethod GetUpdateResult { param($i) $wuaResult }
         $offered = [pscustomobject]@{ Items = @(
-                [pscustomobject]@{ Identity = [pscustomobject]@{ UpdateID = 'UPDATE-A'; RevisionNumber = 10 }; Title = 'A'; Type = 1; EulaAccepted = $true },
-                [pscustomobject]@{ Identity = [pscustomobject]@{ UpdateID = 'UPDATE-B'; RevisionNumber = 20 }; Title = 'B'; Type = 1; EulaAccepted = $true }); Count = 2 }
+                [pscustomobject]@{ Identity = [pscustomobject]@{ UpdateID = 'UPDATE-A'; RevisionNumber = 10 }; Title = 'A'; KBArticleIDs = @('1'); Type = 1; EulaAccepted = $true },
+                [pscustomobject]@{ Identity = [pscustomobject]@{ UpdateID = 'UPDATE-B'; RevisionNumber = 20 }; Title = 'B'; KBArticleIDs = @('2'); Type = 1; EulaAccepted = $true }); Count = 2 }
         $offered | Add-Member ScriptMethod Item { param($i) $this.Items[$i] }
         $script:Chosen = [pscustomobject]@{ Items = @(); Count = 0 }
         $script:Chosen | Add-Member ScriptMethod Add { param($u) $this.Items += $u; $this.Count = $this.Items.Count }

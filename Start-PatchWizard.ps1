@@ -27,6 +27,8 @@ $script:Wizard = @{
     LastRunReadError = ''
     UpdatingGrid = $false
     UpdateRows = @()
+    KbGroups = @()
+    UpdatingSelection = $false
     Controls = @{}
     BaseClientSize = $null
     BaseFont = $null
@@ -373,6 +375,74 @@ function Refresh-WizardSelectionGrid {
             $labelText)
         $grid.Rows[$index].Tag = $row
     }
+    Refresh-WizardKbGrid
+}
+
+function Get-WizardKbGroups {
+    # One group per KB across all VMs. Monthly cumulative updates have a separate KB for each Windows
+    # version, so each version is its own group. An update without a KB is grouped by its UpdateID.
+    $groups = [ordered]@{}
+    for ($index = 0; $index -lt $script:Wizard.UpdateRows.Count; $index++) {
+        $row = $script:Wizard.UpdateRows[$index]
+        $kb = @(Get-PatchArray (Get-PatchValue $row.Update @('kbArticleIds') @())) -join ', '
+        $key = if ($kb) { $kb } else { 'id:' + $row.Key.Split('|')[0] }
+        if (-not $groups.Contains($key)) {
+            $groups[$key] = [pscustomobject]@{ Kb = $kb; Title = [string](Get-PatchValue $row.Update @('title') ''); OsNames = @(); Rows = @(); RowIndexes = @() }
+        }
+        $group = $groups[$key]
+        $group.Rows += $row
+        $group.RowIndexes += $index
+        $system = Get-PatchValue (Get-PatchValue $row.VmRecord @('agentStatus') $null) @('system') $null
+        $osName = ([string](Get-PatchValue $system @('osName') '')) -replace '^Microsoft ', ''
+        if ($osName -and $osName -notin $group.OsNames) { $group.OsNames += $osName }
+    }
+    return @($groups.Values)
+}
+
+function Get-WizardKbGroupState {
+    param($Group)
+    $selectedCount = @($Group.Rows | Where-Object { $_.Selected }).Count
+    if ($selectedCount -eq 0) { return [System.Windows.Forms.CheckState]::Unchecked }
+    if ($selectedCount -eq @($Group.Rows).Count) { return [System.Windows.Forms.CheckState]::Checked }
+    return [System.Windows.Forms.CheckState]::Indeterminate
+}
+
+function Refresh-WizardKbGrid {
+    if ($null -eq $script:Wizard.Controls.KbGrid) { return }
+    $grid = $script:Wizard.Controls.KbGrid
+    $script:Wizard.KbGroups = @(Get-WizardKbGroups)
+    $grid.Rows.Clear()
+    foreach ($group in $script:Wizard.KbGroups) {
+        $kbText = if ($group.Kb) { $group.Kb } else { '(no KB)' }
+        $vmCount = @($group.Rows | ForEach-Object { $_.VmName } | Select-Object -Unique).Count
+        [void]$grid.Rows.Add((Get-WizardKbGroupState -Group $group), $kbText, $group.Title, (@($group.OsNames | Sort-Object) -join ', '), $vmCount)
+    }
+}
+
+function Update-WizardKbGridStates {
+    # Only the check boxes change, so the operator keeps the scroll position.
+    $grid = $script:Wizard.Controls.KbGrid
+    for ($i = 0; $i -lt $script:Wizard.KbGroups.Count; $i++) {
+        $grid.Rows[$i].Cells[0].Value = Get-WizardKbGroupState -Group $script:Wizard.KbGroups[$i]
+    }
+}
+
+function Set-WizardKbGroupSelected {
+    # Checks the group on every VM; a group that is checked everywhere is unchecked everywhere.
+    param([int]$Index)
+    $group = $script:Wizard.KbGroups[$Index]
+    $selected = (Get-WizardKbGroupState -Group $group) -ne [System.Windows.Forms.CheckState]::Checked
+    $selectGrid = $script:Wizard.Controls.SelectGrid
+    $script:Wizard.UpdatingSelection = $true
+    try {
+        foreach ($rowIndex in $group.RowIndexes) {
+            $script:Wizard.UpdateRows[$rowIndex].Selected = $selected
+            $selectGrid.Rows[$rowIndex].Cells[0].Value = $selected
+        }
+    }
+    finally { $script:Wizard.UpdatingSelection = $false }
+    Update-WizardKbGridStates
+    Update-WizardStepState
 }
 
 function Refresh-WizardVmGrid {
@@ -972,7 +1042,7 @@ function Set-WizardScaledBounds {
 function Set-WizardGridMinimumWidths {
     # A column is never narrower than its header text at the current font; when the columns do not
     # fit, the grid shows a horizontal scroll bar instead of squeezing them.
-    foreach ($grid in @($script:Wizard.Controls.VmGrid, $script:Wizard.Controls.SelectGrid, $script:Wizard.Controls.RebootGrid)) {
+    foreach ($grid in @($script:Wizard.Controls.VmGrid, $script:Wizard.Controls.SelectGrid, $script:Wizard.Controls.KbGrid, $script:Wizard.Controls.RebootGrid)) {
         foreach ($column in $grid.Columns) {
             $column.MinimumWidth = [System.Windows.Forms.TextRenderer]::MeasureText($column.HeaderText, $grid.Font).Width + 16
         }
@@ -1235,7 +1305,7 @@ public class PatchWizardOutlineSizing : NativeWindow {
         try { Save-WizardSelections }
         catch { Show-WizardError -Message $_.Exception.Message }
     })
-    $selectHint = New-WizardLabel -Text 'All offered updates are selected initially. Uncheck individual rows; Driver, Browse-only, and EULA required labels are shown.' -X 8 -Y 37 -Width 1000 -Height 26
+    $selectHint = New-WizardLabel -Text 'All offered updates are selected initially. The upper list checks or unchecks a KB on every VM (each Windows version has its own cumulative update KB); the lower list changes single VMs.' -X 8 -Y 37 -Width 1000 -Height 26
     $selectHint.ForeColor = [System.Drawing.Color]::DimGray
     $selectHint.Dock = [System.Windows.Forms.DockStyle]::Top
     $selectGrid = New-Object System.Windows.Forms.DataGridView
@@ -1270,13 +1340,49 @@ public class PatchWizardOutlineSizing : NativeWindow {
     $selectGrid.Add_CellValueChanged({
         param($sender, $eventArgs)
         if ($eventArgs.RowIndex -lt 0 -or $eventArgs.ColumnIndex -ne 0) { return }
+        if ($script:Wizard.UpdatingSelection) { return }
         if ($eventArgs.RowIndex -lt $script:Wizard.UpdateRows.Count) {
             $gridControl = $script:Wizard.Controls.SelectGrid
             $script:Wizard.UpdateRows[$eventArgs.RowIndex].Selected = [bool]$gridControl.Rows[$eventArgs.RowIndex].Cells[0].Value
+            Update-WizardKbGridStates
             Update-WizardStepState
         }
     })
+    # Summary: one row per KB; its check box is set only by a click (read-only, so it has no own state).
+    $kbGrid = New-Object System.Windows.Forms.DataGridView
+    $kbGrid.Dock = [System.Windows.Forms.DockStyle]::Top
+    $kbGrid.Height = 200
+    $kbGrid.AllowUserToAddRows = $false
+    $kbGrid.AllowUserToDeleteRows = $false
+    $kbGrid.MultiSelect = $false
+    $kbGrid.ReadOnly = $true
+    $kbGrid.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
+    $kbGrid.AutoGenerateColumns = $false
+    Set-WizardGridScaling -Grid $kbGrid
+    $kbCheckColumn = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
+    $kbCheckColumn.HeaderText = 'All VMs'
+    $kbCheckColumn.ThreeState = $true
+    $kbCheckColumn.FillWeight = 65
+    [void]$kbGrid.Columns.Add($kbCheckColumn)
+    $kbHeaders = @('KB', 'Title', 'Operating systems', 'VMs')
+    $kbWidths = @(110, 450, 300, 50)
+    for ($i = 0; $i -lt $kbHeaders.Count; $i++) {
+        $column = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+        $column.HeaderText = $kbHeaders[$i]
+        $column.FillWeight = $kbWidths[$i]
+        $column.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::NotSortable
+        [void]$kbGrid.Columns.Add($column)
+    }
+    $kbGrid.Add_CellClick({
+        param($sender, $eventArgs)
+        if ($eventArgs.RowIndex -lt 0 -or $eventArgs.ColumnIndex -ne 0) { return }
+        Set-WizardKbGroupSelected -Index $eventArgs.RowIndex
+    })
+    $perVmLabel = New-WizardLabel -Text 'Per VM:' -X 8 -Y 0 -Width 1000 -Height 22
+    $perVmLabel.Dock = [System.Windows.Forms.DockStyle]::Top
     $selectPanel.Controls.Add($selectGrid)
+    $selectPanel.Controls.Add($perVmLabel)
+    $selectPanel.Controls.Add($kbGrid)
     $selectPanel.Controls.Add($selectHint)
     $selectPanel.Controls.Add($saveSelection)
     $selectTab.Controls.Add($selectPanel)
@@ -1387,6 +1493,7 @@ public class PatchWizardOutlineSizing : NativeWindow {
         ResumeButton = $resume
         VmGrid = $vmGrid
         SelectGrid = $selectGrid
+        KbGrid = $kbGrid
         RebootGrid = $rebootGrid
         RebootButton = $rebootButton
         ScanButton = $scanButton

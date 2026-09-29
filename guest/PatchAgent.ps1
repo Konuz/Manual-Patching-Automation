@@ -159,7 +159,10 @@ function Get-PendingReboot {
 }
 
 function Get-SystemSnapshot {
-    return [ordered]@{ pendingReboot = Get-PendingReboot }
+    return [ordered]@{
+        osName = [string](Get-CimInstance -ClassName Win32_OperatingSystem).Caption
+        pendingReboot = Get-PendingReboot
+    }
 }
 
 function Convert-UpdateType {
@@ -197,6 +200,8 @@ function New-UpdateRecord {
         updateId = [string]$identity.UpdateID
         revisionNumber = [int64]$identity.RevisionNumber
         title = [string]$Update.Title
+        # WUA gives bare numbers ("5065432"); a KB can cover several updates, e.g. one per Defender version.
+        kbArticleIds = @(@($Update.KBArticleIDs) | ForEach-Object { 'KB' + [string]$_ })
         type = Convert-UpdateType -Update $Update
         browseOnly = $browseOnly
         eulaAccepted = [bool]$Update.EulaAccepted
