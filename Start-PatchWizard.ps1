@@ -452,7 +452,8 @@ function Update-WizardStepState {
     $active = $null -ne $script:Wizard.ActivePowerShell
     $script:Wizard.Controls.ResumeButton.Enabled = (-not $active)
     $script:Wizard.Controls.ScanButton.Enabled = (-not $active)
-    $script:Wizard.Controls.InstallButton.Enabled = (-not $active)
+    # Install uses the rows checked in Select updates; with none there is nothing to approve.
+    $script:Wizard.Controls.InstallButton.Enabled = (-not $active -and @($script:Wizard.UpdateRows | Where-Object { $_.Selected }).Count -gt 0)
     $script:Wizard.Controls.VerifyButton.Enabled = (-not $active)
     $script:Wizard.Controls.SaveSelectionButton.Enabled = (-not $active)
     $unresolvedMutatingStep = Get-WizardUnresolvedMutatingStep
@@ -825,6 +826,7 @@ function Start-WizardNewRound {
         Refresh-WizardVmGrid
         Refresh-WizardSelectionGrid
         Refresh-WizardRebootGrid
+        Update-WizardStepState
         $script:Wizard.Tabs.SelectedIndex = 1
         Set-WizardStatus -Message ('Round {0} created. Run Scan to build a fresh update selection.' -f $round)
     }
@@ -1271,6 +1273,7 @@ public class PatchWizardOutlineSizing : NativeWindow {
         if ($eventArgs.RowIndex -lt $script:Wizard.UpdateRows.Count) {
             $gridControl = $script:Wizard.Controls.SelectGrid
             $script:Wizard.UpdateRows[$eventArgs.RowIndex].Selected = [bool]$gridControl.Rows[$eventArgs.RowIndex].Cells[0].Value
+            Update-WizardStepState
         }
     })
     $selectPanel.Controls.Add($selectGrid)
