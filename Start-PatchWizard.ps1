@@ -327,12 +327,11 @@ function Open-WizardLogs {
 }
 
 function Get-WizardUpdateRowsFromState {
-    $rows = @()
     if ($null -eq $script:Wizard.RunState) { return @() }
     # A choice made in the grid but not saved yet survives the refresh after an action.
     $shown = @{}
     foreach ($row in @($script:Wizard.UpdateRows)) { $shown[$row.VmName + '|' + $row.Key] = [bool]$row.Selected }
-    foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
+    $rows = foreach ($vm in @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))) {
         $vmName = [string](Get-PatchValue $vm @('vmName') '')
         $updates = @(Get-PatchArray (Get-PatchValue $vm @('availableUpdates') @()))
         $deselected = @(Get-PatchArray (Get-PatchValue $vm @('deselectedUpdates') @()))
@@ -340,7 +339,7 @@ function Get-WizardUpdateRowsFromState {
             $key = Get-WizardSelectedUpdateKey -Update $update
             if ($null -eq $key) { continue }
             $selected = if ($shown.ContainsKey($vmName + '|' + $key)) { $shown[$vmName + '|' + $key] } else { $key -notin $deselected }
-            $rows += [pscustomobject]@{
+            [pscustomobject]@{
                 VmName = $vmName
                 VmRecord = $vm
                 Update = $update
