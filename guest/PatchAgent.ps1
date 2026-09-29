@@ -198,7 +198,7 @@ function New-UpdateRecord {
         revisionNumber = [int64]$identity.RevisionNumber
         title = [string]$Update.Title
         # WUA gives bare numbers ("5065432"); a KB can cover several updates, e.g. one per Defender version.
-        kbArticleIds = @(@($Update.KBArticleIDs) | ForEach-Object { 'KB' + [string]$_ })
+        kbArticleIds = @($Update.KBArticleIDs | ForEach-Object { 'KB' + [string]$_ })
         type = Convert-UpdateType -Update $Update
         browseOnly = $browseOnly
         eulaAccepted = [bool]$Update.EulaAccepted

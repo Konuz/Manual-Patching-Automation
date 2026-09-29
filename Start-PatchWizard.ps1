@@ -387,10 +387,9 @@ function Get-WizardKbGroups {
         $kb = @(Get-PatchArray (Get-PatchValue $row.Update @('kbArticleIds') @())) -join ', '
         $key = if ($kb) { $kb } else { 'id:' + $row.Key.Split('|')[0] }
         if (-not $groups.Contains($key)) {
-            $groups[$key] = [pscustomobject]@{ Kb = $kb; Title = [string](Get-PatchValue $row.Update @('title') ''); OsNames = @(); Rows = @(); RowIndexes = @() }
+            $groups[$key] = [pscustomobject]@{ Kb = $kb; Title = [string](Get-PatchValue $row.Update @('title') ''); OsNames = @(); RowIndexes = @() }
         }
         $group = $groups[$key]
-        $group.Rows += $row
         $group.RowIndexes += $index
         $osName = ([string](Get-PatchValue $row.VmRecord @('osName') '')) -replace '^Microsoft ', ''
         if ($osName -and $osName -notin $group.OsNames) { $group.OsNames += $osName }
@@ -400,20 +399,19 @@ function Get-WizardKbGroups {
 
 function Get-WizardKbGroupState {
     param($Group)
-    $selectedCount = @($Group.Rows | Where-Object { $_.Selected }).Count
+    $selectedCount = @($Group.RowIndexes | Where-Object { $script:Wizard.UpdateRows[$_].Selected }).Count
     if ($selectedCount -eq 0) { return [System.Windows.Forms.CheckState]::Unchecked }
-    if ($selectedCount -eq @($Group.Rows).Count) { return [System.Windows.Forms.CheckState]::Checked }
+    if ($selectedCount -eq @($Group.RowIndexes).Count) { return [System.Windows.Forms.CheckState]::Checked }
     return [System.Windows.Forms.CheckState]::Indeterminate
 }
 
 function Refresh-WizardKbGrid {
-    if ($null -eq $script:Wizard.Controls.KbGrid) { return }
     $grid = $script:Wizard.Controls.KbGrid
     $script:Wizard.KbGroups = @(Get-WizardKbGroups)
     $grid.Rows.Clear()
     foreach ($group in $script:Wizard.KbGroups) {
         $kbText = if ($group.Kb) { $group.Kb } else { '(no KB)' }
-        $vmCount = @($group.Rows | ForEach-Object { $_.VmName } | Select-Object -Unique).Count
+        $vmCount = @($group.RowIndexes | ForEach-Object { $script:Wizard.UpdateRows[$_].VmName } | Select-Object -Unique).Count
         [void]$grid.Rows.Add((Get-WizardKbGroupState -Group $group), $kbText, $group.Title, (@($group.OsNames | Sort-Object) -join ', '), $vmCount)
     }
 }
