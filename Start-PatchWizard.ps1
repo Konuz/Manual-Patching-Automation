@@ -627,7 +627,8 @@ function Show-WizardCredentialDecision {
 
 function Show-WizardApproval {
     # Replaces a MessageBox, which grows past the screen (buttons included) with one line per VM.
-    param([string]$Title, [string]$Question, [string[]]$Lines)
+    # With Details (one text per line), clicking a line opens a box below the list with its text.
+    param([string]$Title, [string]$Question, [string[]]$Lines, [string[]]$Details = @())
 
     $dialog = New-Object System.Windows.Forms.Form
     $dialog.Text = $Title
@@ -644,13 +645,18 @@ function Show-WizardApproval {
     $label.Location = New-Object System.Drawing.Point(56, 12)
     $label.Size = New-Object System.Drawing.Size(572, 64)
     $label.Text = $Question
-    $list = New-Object System.Windows.Forms.TextBox
+    $list = New-Object System.Windows.Forms.ListBox
     $list.Location = New-Object System.Drawing.Point(12, 84)
     $list.Size = New-Object System.Drawing.Size(616, 320)
-    $list.Multiline = $true
-    $list.ReadOnly = $true
-    $list.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
-    $list.Text = $Lines -join [Environment]::NewLine
+    $list.IntegralHeight = $false
+    $list.Items.AddRange([object[]]$Lines)
+    $detailBox = New-Object System.Windows.Forms.TextBox
+    $detailBox.Location = New-Object System.Drawing.Point(12, 414)
+    $detailBox.Size = New-Object System.Drawing.Size(616, 160)
+    $detailBox.Multiline = $true
+    $detailBox.ReadOnly = $true
+    $detailBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+    $detailBox.Visible = $false
     $yes = New-Object System.Windows.Forms.Button
     $yes.Text = 'Yes'
     $yes.Size = New-Object System.Drawing.Size(100, 30)
@@ -661,7 +667,20 @@ function Show-WizardApproval {
     $no.Size = New-Object System.Drawing.Size(100, 30)
     $no.Location = New-Object System.Drawing.Point(528, 418)
     $no.DialogResult = [System.Windows.Forms.DialogResult]::No
-    $dialog.Controls.AddRange(@($icon, $label, $list, $yes, $no))
+    if ($Details.Count -gt 0) {
+        $list.Add_SelectedIndexChanged({
+            if ($list.SelectedIndex -lt 0) { return }
+            if (-not $detailBox.Visible) {
+                # The first click opens the box: the dialog grows and the buttons move below it.
+                $dialog.ClientSize = New-Object System.Drawing.Size(640, 630)
+                $yes.Top = 588
+                $no.Top = 588
+                $detailBox.Visible = $true
+            }
+            $detailBox.Text = $Details[$list.SelectedIndex]
+        })
+    }
+    $dialog.Controls.AddRange(@($icon, $label, $list, $detailBox, $yes, $no))
     $dialog.AcceptButton = $yes
     $dialog.CancelButton = $no
     $dialog.ActiveControl = $yes
@@ -756,9 +775,19 @@ function Start-WizardAction {
                     if (Test-PatchStepStarted -VMRecord $_ -Action 'Install') { '{0}: observe the install already started (it is not started again)' -f $_.vmName }
                     else { '{0}: {1} update(s)' -f $_.vmName, @(Get-PatchArray $_.selectedUpdates).Count }
                 })
+            # One text per VM: its selected updates with KB and title, found among its offered updates.
+            $details = @($plan | ForEach-Object {
+                    $selectedKeys = @(Get-PatchArray $_.selectedUpdates | ForEach-Object { Get-WizardSelectedUpdateKey -Update $_ })
+                    @(Get-PatchArray (Get-PatchValue $_ @('availableUpdates') @()) |
+                        Where-Object { (Get-WizardSelectedUpdateKey -Update $_) -in $selectedKeys } |
+                        ForEach-Object {
+                            $kb = @(Get-PatchArray (Get-PatchValue $_ @('kbArticleIds') @())) -join ', '
+                            '{0}  {1}' -f $(if ($kb) { $kb } else { '(no KB)' }), $_.title
+                        }) -join [Environment]::NewLine
+                })
             $updateCount = ($plan | ForEach-Object { @(Get-PatchArray $_.selectedUpdates).Count } | Measure-Object -Sum).Sum
-            $installPrompt = 'Install the selected updates on these {0} VM(s), {1} update(s) in total? The agent searches again and installs only matching UpdateID and RevisionNumber values; it does not reboot.' -f $plan.Count, $updateCount
-            if (-not (Show-WizardApproval -Title 'Approve installation' -Question $installPrompt -Lines $lines)) { return }
+            $installPrompt = 'Install the selected updates on these {0} VM(s), {1} update(s) in total? The agent searches again and installs only matching UpdateID and RevisionNumber values; it does not reboot. Click a VM to see its updates.' -f $plan.Count, $updateCount
+            if (-not (Show-WizardApproval -Title 'Approve installation' -Question $installPrompt -Lines $lines -Details $details)) { return }
         }
         if ($Action -eq 'Reboot' -and -not $ApprovalAlreadyGiven) {
             Refresh-WizardRebootGrid
