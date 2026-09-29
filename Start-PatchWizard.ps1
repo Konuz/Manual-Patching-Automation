@@ -641,6 +641,8 @@ function Show-WizardApproval {
     $icon.Image = [System.Drawing.SystemIcons]::Warning.ToBitmap()
     $icon.Location = New-Object System.Drawing.Point(12, 12)
     $icon.Size = New-Object System.Drawing.Size(32, 32)
+    # The system icon follows the display scaling (40 px at 125 %), so it is scaled into the box, not cropped.
+    $icon.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
     $label = New-Object System.Windows.Forms.Label
     $label.Location = New-Object System.Drawing.Point(56, 12)
     $label.Size = New-Object System.Drawing.Size(572, 64)
