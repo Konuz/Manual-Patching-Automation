@@ -192,7 +192,7 @@ function Save-WizardSelections {
         Set-PatchValue -InputObject $vm -Name 'selectedUpdates' -Value @($selected)
         $savedCount += $selected.Count
         # Only what the operator unchecked is remembered: every other offered update, also one offered by a
-        # later scan, stays preselected (plan).
+        # later scan, stays preselected.
         Set-PatchValue -InputObject $vm -Name 'deselectedUpdates' -Value @($deselected)
     }
 
@@ -297,7 +297,7 @@ function Resume-WizardRun {
         Update-WizardStepState
         Set-WizardStatus -Message 'Run loaded.'
 
-        # An interrupted action continues by observing the steps it already started (plan: Resume run).
+        # An interrupted action continues by observing the steps it already started.
         $currentAction = [string](Get-PatchValue $state @('currentAction') '')
         if ([string]$state.status -eq 'Running' -and $currentAction -in @('Scan', 'Install', 'Reboot', 'Verify')) {
             Set-WizardStatus -Message ('{0} was interrupted; its started installs and reboots are observed again; nothing new is installed or rebooted without a new approval (a scan simply runs again).' -f $currentAction)
@@ -641,7 +641,6 @@ function Show-WizardApproval {
     $icon.Image = [System.Drawing.SystemIcons]::Warning.ToBitmap()
     $icon.Location = New-Object System.Drawing.Point(12, 12)
     $icon.Size = New-Object System.Drawing.Size(32, 32)
-    # The system icon follows the display scaling (40 px at 125 %), so it is scaled into the box, not cropped.
     $icon.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
     $label = New-Object System.Windows.Forms.Label
     $label.Location = New-Object System.Drawing.Point(56, 12)
@@ -673,7 +672,6 @@ function Show-WizardApproval {
         $list.Add_SelectedIndexChanged({
             if ($list.SelectedIndex -lt 0) { return }
             if (-not $detailBox.Visible) {
-                # The first click opens the box: the dialog grows and the buttons move below it.
                 $dialog.ClientSize = New-Object System.Drawing.Size(640, 630)
                 $yes.Top = 588
                 $no.Top = 588
@@ -693,7 +691,6 @@ function Show-WizardApproval {
 function Resolve-WizardCredentialRejection {
     param([string]$Action)
 
-    # Plan step 1: a rejected guest credential offers Retry, Skip (for the rest of this run), or Stop.
     $allVms = @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))
     $affected = @($allVms | Where-Object { [string](Get-PatchValue $_ @('status') '') -eq 'GuestCredentialRejected' })
     if ($affected.Count -eq 0) { return 'None' }
@@ -776,7 +773,6 @@ function Start-WizardAction {
                     if (Test-PatchStepStarted -VMRecord $_ -Action 'Install') { '{0}: observe the install already started (it is not started again)' -f $_.vmName }
                     else { '{0}: {1} update(s)' -f $_.vmName, @(Get-PatchArray $_.selectedUpdates).Count }
                 })
-            # One text per VM: its selected updates with KB and title, found among its offered updates.
             # A started install is only observed, and the current selection need not be what it installs.
             $details = @($plan | ForEach-Object {
                     if (Test-PatchStepStarted -VMRecord $_ -Action 'Install') { return 'The install already started is only observed; nothing new is installed on this VM.' }
@@ -1374,7 +1370,6 @@ public class PatchWizardRowComparer : IComparer {
         if ($panel.Visible) { $button.Text = 'Advanced limits (click to collapse)' } else { $button.Text = 'Advanced limits (click to expand)' }
     })
 
-    # Hover help for the concurrency and limit fields (shown on both the label and the text box).
     $toolTip = New-Object System.Windows.Forms.ToolTip
     $toolTip.AutoPopDelay = 15000
     $hints = @(
@@ -1430,7 +1425,6 @@ public class PatchWizardRowComparer : IComparer {
     # The VM table sits below the tabs, so each step (except Settings) shows the VMs and their results.
     $vmGrid = New-WizardGrid -Headers @('VM', 'Expected FQDN', 'Status', 'Current action', 'Offered updates', 'Reboot', 'Cluster', 'Errors', 'Account group') -Widths @(170, 200, 135, 110, 95, 115, 90, 55, 150)
     $vmGrid.Dock = [System.Windows.Forms.DockStyle]::Fill
-    # A white frame as wide as the tab page border, so the table lines up with the lists on the tabs.
     $vmPanel = New-Object System.Windows.Forms.Panel
     $vmPanel.Dock = [System.Windows.Forms.DockStyle]::Bottom
     $vmPanel.Height = 198
@@ -1496,7 +1490,7 @@ public class PatchWizardRowComparer : IComparer {
             Update-WizardStepState
         }
     })
-    # Summary: one row per KB; its check box is set only by a click (read-only, so it has no own state).
+    # One row per KB; read-only, so its check box changes only through CellClick.
     $kbGrid = New-Object System.Windows.Forms.DataGridView
     $kbGrid.Dock = [System.Windows.Forms.DockStyle]::Top
     $kbGrid.Height = 200

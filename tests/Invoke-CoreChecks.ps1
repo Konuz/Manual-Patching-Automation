@@ -1,4 +1,4 @@
-# Offline checks of the key behaviours listed in Plan.md (64-bit Windows PowerShell 5.1).
+# Offline checks of the six key behaviours (64-bit Windows PowerShell 5.1).
 # Local doubles only: no vCenter, WUA, installation or reboot.
 
 $ErrorActionPreference = 'Stop'

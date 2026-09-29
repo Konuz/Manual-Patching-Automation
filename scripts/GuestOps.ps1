@@ -53,7 +53,7 @@ function Get-GuestFault {
 function Get-PatchVM {
     # Finds exactly one VM on this vCenter: by the saved object ID, else by exact name.
     # An FQDN-shaped entry (app01.corp.local) that is not a VM name is retried as the short name.
-    # The guest FQDN is checked only when one is expected (plan: a mismatch blocks the VM).
+    # The guest FQDN is checked only when one is expected; a mismatch blocks the VM.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][ValidateNotNull()][object]$Server,

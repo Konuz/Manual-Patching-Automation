@@ -1,10 +1,5 @@
 # Windows PowerShell 5.1 patch-run controller.
-# Public functions:
-#   New-PatchRun(config, VM entries) creates runs/<runId>/run.json without credentials.
-#   Read-PatchRun, Write-PatchRun, Write-PatchEvent, Write-PatchError persist run state and logs.
-#   Resolve-PatchVms(RunPath, VCenterCredentials) finds each VM on one of the vCenters and groups it for guest credentials.
-#   Invoke-PatchAction(Action, RunPath, VCenterCredentials, GuestCredentials) runs one operator step.
-#   VCenterCredentials: vCenter name -> PSCredential; the key '*' is used for every vCenter without its own.
+# VCenterCredentials: vCenter name -> PSCredential; the key '*' is used for every vCenter without its own.
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -196,7 +191,7 @@ function New-PatchRun {
         [Parameter(Mandatory = $true)]$VMEntries
     )
 
-    # Config comes from the GUI: VCenter, OutputRoot and Options (missing options use the plan defaults).
+    # Config comes from the GUI: VCenter, OutputRoot and Options (missing options use the defaults).
     $options = Get-PatchValue $Config @('Options') $null
     $option = { param([string]$Name, $Default) $value = Get-PatchValue $options @($Name) $null; if ($null -eq $value) { $Default } else { $value } }
     # One or more vCenters, separated by commas, semicolons or spaces.
@@ -468,7 +463,7 @@ function Save-PatchDecision {
 
 function Test-PatchMutatingStepReconciled {
     # A started install or reboot is settled only by its final result or by the operator's review
-    # (plan: an unclear result needs manual reconciliation before the next installation).
+    # (an unclear result needs manual reconciliation before the next installation).
     param($Step)
     if (-not [bool]$Step.startAttempted) { return $true }
     $status = [string]$Step.status
@@ -520,7 +515,6 @@ function Get-PatchGuestPaths {
 }
 
 function Get-PatchLatestStep {
-    # The latest step of this action in the VM's current round, or $null.
     param($VMRecord, [string]$Action)
     $round = [int]$VMRecord.currentRound
     $steps = @(Get-PatchArray $VMRecord.steps | Where-Object { [string]$_.action -eq $Action -and [int]$_.round -eq $round })
@@ -539,7 +533,7 @@ function Test-PatchStepStarted {
 }
 
 function Test-PatchInstallDone {
-    # Plan: one installation per round; updates found later (e.g. by Verify) need a new round and selection.
+    # One installation per round; updates found later (e.g. by Verify) need a new round and selection.
     # A failed install (the agent reported it, e.g. Windows Update search or download failed) may be approved again.
     param($VMRecord)
     $step = Get-PatchLatestStep -VMRecord $VMRecord -Action 'Install'
@@ -780,7 +774,7 @@ function Invoke-PatchAgentStep {
 
     $waitResult = Wait-PatchAgent -Context $Context -RunState $RunState -VMRecord $VMRecord -Step $step -RunPath $RunPath -TimeoutMinutes $TimeoutMinutes
     if ($Action -in @('Scan', 'Verify') -and $waitResult.status -eq 'Completed') {
-        # Plan: an unrecognised cluster state blocks the VM and goes to the errors at once.
+        # An unrecognised cluster state blocks the VM and goes to the errors at once.
         $cluster = Get-PatchValue $waitResult.agentStatus @('cluster') $null
         if ([string](Get-PatchValue $cluster @('membership') 'Unknown') -eq 'Unknown') {
             $waitResult.error = 'The cluster state is unknown ({0}); install and reboot are blocked for this VM.' -f [string](Get-PatchValue $cluster @('reason') 'no reason reported')
@@ -796,7 +790,7 @@ function Invoke-PatchAgentStep {
 }
 
 function Wait-PatchReboot {
-    # Plan step 5: a reboot is confirmed only by a guest boot time newer than the baseline saved
+    # A reboot is confirmed only by a guest boot time newer than the baseline saved
     # before the reboot was sent. This function never sends a reboot.
     param([string]$RunPath, $RunState, $VMRecord, $Step, $Server, $GuestCredential, [int]$TimeoutMinutes)
 
@@ -826,7 +820,7 @@ function Wait-PatchReboot {
                 Set-PatchValue -InputObject $Step -Name 'confirmedBootTime' -Value $bootTime
                 $result = [pscustomobject]@{ status = 'Confirmed'; step = $Step; agentStatus = $status; error = $null }
                 if ($null -eq $status) {
-                    # Plan: the reboot is confirmed by the newer boot time; without the agent's status.json it may not
+                    # The reboot is confirmed by the newer boot time; without the agent's status.json it may not
                     # be the reboot this step sent (e.g. the guest restarted on its own), so the log says so.
                     Write-PatchEvent -RunPath $RunPath -Message 'Reboot confirmed by a newer boot time only; the agent''s status.json was not found.' -VMName $VMRecord.vmName -Step 'Reboot' -Level 'WARN'
                 }
@@ -922,7 +916,7 @@ function Add-PatchVmResult {
         if ($status -eq 'Confirmed') {
             Set-PatchValue -InputObject $VMRecord.reboot -Name 'confirmedBootTime' -Value $Result.step.confirmedBootTime
         }
-        # A reboot that may have been sent but is not confirmed stops the next reboot batches (plan: step 5),
+        # A reboot that may have been sent but is not confirmed stops the next reboot batches,
         # whatever the result says (e.g. a rejected credential while observing). A VM that failed before its
         # reboot was sent, or whose agent reported that it did not restart, affects only itself.
         if ($status -ne 'Confirmed' -and (Test-PatchStepStarted -VMRecord $VMRecord -Action 'Reboot')) {
@@ -1003,7 +997,7 @@ function Connect-PatchVCenters {
 
 function Resolve-PatchVms {
     # Before the first guest action: find each VM on the listed vCenters and group it for guest
-    # credentials. A name found on more than one vCenter is ambiguous and blocks the VM (plan).
+    # credentials. A name found on more than one vCenter is ambiguous and blocks the VM.
     # Only vCenter credentials are needed. A VM that cannot be found yet is tried again next time.
     [CmdletBinding()]
     param(
@@ -1058,7 +1052,7 @@ function Invoke-PatchAction {
         [Parameter(Mandatory = $true)][hashtable]$VCenterCredentials,
         # Guest credentials by credential group (see Get-PatchAccountGroup); kept in memory only.
         [Parameter(Mandatory = $true)][hashtable]$GuestCredentials,
-        # Resume run: observe the installs and reboots already started; start no new ones (plan: Resume run).
+        # Resume run: observe the installs and reboots already started; start no new ones.
         [switch]$ObserveOnly,
         # Retry after a rejected guest credential: only these VMs; the others keep their results.
         [string[]]$VmNames = @()
@@ -1125,7 +1119,7 @@ function Invoke-PatchAction {
             }
             catch {
                 # Get-GuestContext raises InvalidCredentialException when the guest rejects the account;
-                # the GUI then offers Retry, Skip or Stop (plan: step 1).
+                # the GUI then offers Retry, Skip or Stop.
                 # While waiting for a started agent or reboot, a lost contact leaves the step running; approving the
                 # step again observes it (NeedsReview, not Failed).
                 if ($_.Exception -is [System.Security.Authentication.InvalidCredentialException]) {
@@ -1149,14 +1143,14 @@ function Invoke-PatchAction {
             elseif ($Action -eq 'Install' -and (Test-PatchInstallDone -VMRecord $vmRecord)) { $skip = 'SkippedInstalledThisRound' }
             elseif ($Action -eq 'Reboot' -and -not (Test-PatchVmRequiresReboot -VMRecord $vmRecord)) { $skip = 'SkippedNoReboot' }
             elseif ($Action -in @('Install', 'Reboot') -and $membership -ne 'NotMember') {
-                # Plan: a configured cluster node is excluded; an unrecognised state blocks the VM and is an error.
+                # A configured cluster node is excluded; an unrecognised state blocks the VM and is an error.
                 $skip = 'ExcludedCluster'
                 if ($membership -ne 'Member') { $skipError = ('{0} is blocked because the cluster membership is {1}.' -f $Action, $membership) }
             }
             elseif ($ObserveOnly -and $Action -in @('Install', 'Reboot') -and -not (Test-PatchStepStarted -VMRecord $vmRecord -Action $Action)) { $skip = 'SkippedNotStarted' }
             elseif ($Action -in @('Install', 'Reboot') -and -not (Test-PatchStepStarted -VMRecord $vmRecord -Action $Action) -and
                 $null -ne ($blocker = Get-PatchMutatingStepBlocker -RunState $run -VMRecord $vmRecord -CurrentStep $null)) {
-                # Plan: an unclear result needs manual reconciliation before the next install or reboot of this VM.
+                # An unclear result needs manual reconciliation before the next install or reboot of this VM.
                 $skip = 'SkippedUnreviewedStep'
                 $skipError = 'The {0} step of round {1} has no final result. Check the guest and use Mark steps reviewed.' -f $blocker.action, $blocker.round
             }
@@ -1165,7 +1159,7 @@ function Invoke-PatchAction {
         }
 
         # Reboots already sent but not confirmed are observed first, in batches of their own; until they are
-        # confirmed no new reboot is sent (plan: step 5), also when they are not part of this call (Retry).
+        # confirmed no new reboot is sent, also when they are not part of this call (Retry).
         # Installs without a final result are observed first too: one that may still be running holds back the
         # next install batches, so no more installs run at once than the install concurrency.
         $observed = @($toRun | Where-Object { $Action -in @('Install', 'Reboot') -and (Test-PatchStepStarted -VMRecord $_ -Action $Action) })
