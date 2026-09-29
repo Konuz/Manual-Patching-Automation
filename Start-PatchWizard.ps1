@@ -1397,9 +1397,15 @@ public class PatchWizardRowComparer : IComparer {
     $scanTab.Controls.Add($scanButton)
     # The VM table sits below the tabs, so each step (except Settings) shows the VMs and their results.
     $vmGrid = New-WizardGrid -Headers @('VM', 'Expected FQDN', 'Status', 'Current action', 'Offered updates', 'Reboot', 'Cluster', 'Errors', 'Account group') -Widths @(170, 200, 135, 110, 95, 115, 90, 55, 150)
-    $vmGrid.Dock = [System.Windows.Forms.DockStyle]::Bottom
-    $vmGrid.Height = 190
-    $vmGrid.Visible = $false
+    $vmGrid.Dock = [System.Windows.Forms.DockStyle]::Fill
+    # A white frame as wide as the tab page border, so the table lines up with the lists on the tabs.
+    $vmPanel = New-Object System.Windows.Forms.Panel
+    $vmPanel.Dock = [System.Windows.Forms.DockStyle]::Bottom
+    $vmPanel.Height = 198
+    $vmPanel.Padding = New-Object System.Windows.Forms.Padding(4)
+    $vmPanel.BackColor = [System.Drawing.SystemColors]::Window
+    $vmPanel.Visible = $false
+    $vmPanel.Controls.Add($vmGrid)
     [void]$tabs.TabPages.Add($scanTab)
 
     $selectTab = New-Object System.Windows.Forms.TabPage
@@ -1578,10 +1584,10 @@ public class PatchWizardRowComparer : IComparer {
     $statusText.ReadOnly = $true
     $statusPanel.Controls.AddRange(@($statusLabel, $progressLabel, $progress, $statusText))
     $form.Controls.Add($statusPanel)
-    $form.Controls.Add($vmGrid)
+    $form.Controls.Add($vmPanel)
     $form.Controls.SetChildIndex($header, 3)
     $form.Controls.SetChildIndex($statusPanel, 2)
-    $form.Controls.SetChildIndex($vmGrid, 1)
+    $form.Controls.SetChildIndex($vmPanel, 1)
     $form.Controls.SetChildIndex($tabs, 0)
 
     $script:Wizard.Controls = @{
@@ -1637,7 +1643,7 @@ public class PatchWizardRowComparer : IComparer {
     $form.Add_Resize({ Update-WizardScale })
     # A hidden tab page gets its new size only when shown, so place its content again then.
     $tabs.Add_SelectedIndexChanged({
-        $script:Wizard.Controls.VmGrid.Visible = ($script:Wizard.Tabs.SelectedIndex -ne 0)
+        $script:Wizard.Controls.VmGrid.Parent.Visible = ($script:Wizard.Tabs.SelectedIndex -ne 0)
         Update-WizardScale
     })
 
