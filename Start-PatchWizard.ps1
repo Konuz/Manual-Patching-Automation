@@ -683,9 +683,8 @@ function Show-WizardApproval {
         })
     }
     $dialog.Controls.AddRange(@($icon, $label, $list, $detailBox, $yes, $no))
-    $dialog.AcceptButton = $yes
+    # No default button: Enter after clicking a VM must not approve; Yes needs its own click (or Space).
     $dialog.CancelButton = $no
-    $dialog.ActiveControl = $yes
     $answer = $dialog.ShowDialog($script:Wizard.Form)
     $dialog.Dispose()
     return ($answer -eq [System.Windows.Forms.DialogResult]::Yes)
@@ -778,7 +777,9 @@ function Start-WizardAction {
                     else { '{0}: {1} update(s)' -f $_.vmName, @(Get-PatchArray $_.selectedUpdates).Count }
                 })
             # One text per VM: its selected updates with KB and title, found among its offered updates.
+            # A started install is only observed, and the current selection need not be what it installs.
             $details = @($plan | ForEach-Object {
+                    if (Test-PatchStepStarted -VMRecord $_ -Action 'Install') { return 'The install already started is only observed; nothing new is installed on this VM.' }
                     $selectedKeys = @(Get-PatchArray $_.selectedUpdates | ForEach-Object { Get-WizardSelectedUpdateKey -Update $_ })
                     @(Get-PatchArray (Get-PatchValue $_ @('availableUpdates') @()) |
                         Where-Object { (Get-WizardSelectedUpdateKey -Update $_) -in $selectedKeys } |
@@ -787,7 +788,7 @@ function Start-WizardAction {
                             '{0}  {1}' -f $(if ($kb) { $kb } else { '(no KB)' }), $_.title
                         }) -join [Environment]::NewLine
                 })
-            $updateCount = ($plan | ForEach-Object { @(Get-PatchArray $_.selectedUpdates).Count } | Measure-Object -Sum).Sum
+            $updateCount = [int]($plan | Where-Object { -not (Test-PatchStepStarted -VMRecord $_ -Action 'Install') } | ForEach-Object { @(Get-PatchArray $_.selectedUpdates).Count } | Measure-Object -Sum).Sum
             $installPrompt = 'Install the selected updates on these {0} VM(s), {1} update(s) in total? The agent searches again and installs only matching UpdateID and RevisionNumber values; it does not reboot. Click a VM to see its updates.' -f $plan.Count, $updateCount
             if (-not (Show-WizardApproval -Title 'Approve installation' -Question $installPrompt -Lines $lines -Details $details)) { return }
         }
