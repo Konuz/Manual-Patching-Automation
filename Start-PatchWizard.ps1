@@ -625,6 +625,51 @@ function Show-WizardCredentialDecision {
     return $choice
 }
 
+function Show-WizardApproval {
+    # Replaces a MessageBox, which grows past the screen (buttons included) with one line per VM.
+    param([string]$Title, [string]$Question, [string[]]$Lines)
+
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = $Title
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MinimizeBox = $false
+    $dialog.MaximizeBox = $false
+    $dialog.ClientSize = New-Object System.Drawing.Size(640, 460)
+    $icon = New-Object System.Windows.Forms.PictureBox
+    $icon.Image = [System.Drawing.SystemIcons]::Warning.ToBitmap()
+    $icon.Location = New-Object System.Drawing.Point(12, 12)
+    $icon.Size = New-Object System.Drawing.Size(32, 32)
+    $label = New-Object System.Windows.Forms.Label
+    $label.Location = New-Object System.Drawing.Point(56, 12)
+    $label.Size = New-Object System.Drawing.Size(572, 64)
+    $label.Text = $Question
+    $list = New-Object System.Windows.Forms.TextBox
+    $list.Location = New-Object System.Drawing.Point(12, 84)
+    $list.Size = New-Object System.Drawing.Size(616, 320)
+    $list.Multiline = $true
+    $list.ReadOnly = $true
+    $list.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+    $list.Text = $Lines -join [Environment]::NewLine
+    $yes = New-Object System.Windows.Forms.Button
+    $yes.Text = 'Yes'
+    $yes.Size = New-Object System.Drawing.Size(100, 30)
+    $yes.Location = New-Object System.Drawing.Point(418, 418)
+    $yes.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+    $no = New-Object System.Windows.Forms.Button
+    $no.Text = 'No'
+    $no.Size = New-Object System.Drawing.Size(100, 30)
+    $no.Location = New-Object System.Drawing.Point(528, 418)
+    $no.DialogResult = [System.Windows.Forms.DialogResult]::No
+    $dialog.Controls.AddRange(@($icon, $label, $list, $yes, $no))
+    $dialog.AcceptButton = $yes
+    $dialog.CancelButton = $no
+    $dialog.ActiveControl = $yes
+    $answer = $dialog.ShowDialog($script:Wizard.Form)
+    $dialog.Dispose()
+    return ($answer -eq [System.Windows.Forms.DialogResult]::Yes)
+}
+
 function Resolve-WizardCredentialRejection {
     param([string]$Action)
 
@@ -711,9 +756,9 @@ function Start-WizardAction {
                     if (Test-PatchStepStarted -VMRecord $_ -Action 'Install') { '{0}: observe the install already started (it is not started again)' -f $_.vmName }
                     else { '{0}: {1} update(s)' -f $_.vmName, @(Get-PatchArray $_.selectedUpdates).Count }
                 })
-            $installPrompt = 'Install the selected updates on these VMs? The agent searches again and installs only matching UpdateID and RevisionNumber values; it does not reboot.{0}{0}{1}' -f [Environment]::NewLine, ($lines -join [Environment]::NewLine)
-            $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, $installPrompt, 'Approve installation', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-            if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            $updateCount = ($plan | ForEach-Object { @(Get-PatchArray $_.selectedUpdates).Count } | Measure-Object -Sum).Sum
+            $installPrompt = 'Install the selected updates on these {0} VM(s), {1} update(s) in total? The agent searches again and installs only matching UpdateID and RevisionNumber values; it does not reboot.' -f $plan.Count, $updateCount
+            if (-not (Show-WizardApproval -Title 'Approve installation' -Question $installPrompt -Lines $lines)) { return }
         }
         if ($Action -eq 'Reboot' -and -not $ApprovalAlreadyGiven) {
             Refresh-WizardRebootGrid
@@ -724,8 +769,8 @@ function Start-WizardAction {
                     if (Test-PatchStepStarted -VMRecord $_ -Action 'Reboot') { '{0}: observe the reboot already sent (it is not sent again)' -f $_.vmName }
                     else { '{0}: reboot now' -f $_.vmName }
                 })
-            $answer = [System.Windows.Forms.MessageBox]::Show($script:Wizard.Form, ('Approve the reboot step for these VMs? The next batch starts only after the previous one reports a newer boot time.{0}{0}{1}' -f [Environment]::NewLine, ($lines -join [Environment]::NewLine)), 'Approve reboot', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-            if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+            $rebootPrompt = 'Approve the reboot step for these {0} VM(s)? The next batch starts only after the previous one reports a newer boot time.' -f $pending.Count
+            if (-not (Show-WizardApproval -Title 'Approve reboot' -Question $rebootPrompt -Lines $lines)) { return }
         }
 
         # VMs not yet found in vCenter are resolved first (vCenter credential only), so the guest

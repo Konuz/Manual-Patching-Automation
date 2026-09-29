@@ -57,6 +57,8 @@ The wizard presents six steps. Actions that can change a guest require a separat
 5. **Reboot** — review the VMs with fresh reboot evidence and approve the reboot batch separately. The next batch waits for a newer boot time and running VMware Tools.
 6. **Verify** — start a fresh scan, then start another operator-selected round or finish the run with the remaining updates listed.
 
+The Install and Reboot approvals show the number of VMs (and updates) and a scrollable list of every VM with what will happen to it.
+
 The wizard does not automatically repeat a round, resend an uncertain install, or send a second reboot after an interrupted run. A final agent result must match its `runId`, `stepId`, mode, and have a parseable `finishedAt`. A reboot counts as done only when the guest reports a boot time newer than the one saved before the reboot was sent.
 
 A failed or excluded VM (wrong name, FQDN mismatch, cluster member) is recorded and skipped; the other VMs continue. Cluster members (`ExcludedCluster`) are not offered for install or reboot; an unknown cluster state is also written to `errors.log`. Only a reboot that was sent but not confirmed stops the next reboot batches.
