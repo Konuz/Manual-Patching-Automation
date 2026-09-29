@@ -159,10 +159,7 @@ function Get-PendingReboot {
 }
 
 function Get-SystemSnapshot {
-    return [ordered]@{
-        osName = [string](Get-CimInstance -ClassName Win32_OperatingSystem).Caption
-        pendingReboot = Get-PendingReboot
-    }
+    return [ordered]@{ pendingReboot = Get-PendingReboot }
 }
 
 function Convert-UpdateType {
@@ -270,6 +267,8 @@ function Get-UpdateKey {
 function Invoke-Scan {
     $script:Status.cluster = Get-ClusterState
     $script:Status.system = Get-SystemSnapshot
+    # Shown next to the offered KBs; read only here so that Install and Reboot do not depend on WMI.
+    $script:Status.osName = [string](Get-CimInstance -ClassName Win32_OperatingSystem).Caption
     $search = Search-Updates
     $script:Status.searchResult = New-WuaResult -Result $search.result
     if ([int]$search.result.ResultCode -ne 2) {

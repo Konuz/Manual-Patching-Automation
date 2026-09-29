@@ -592,6 +592,7 @@ function Update-PatchVmFromAgentStatus {
         if ($searchSucceeded) {
             Set-PatchValue -InputObject $VMRecord -Name 'availableUpdates' -Value $updates
             Set-PatchValue -InputObject $VMRecord -Name 'pendingUpdates' -Value $updates
+            Set-PatchValue -InputObject $VMRecord -Name 'osName' -Value ([string](Get-PatchValue $Status @('osName') ''))
         }
         # A fresh scan is the current truth about a pending reboot; without one, a confirmed reboot stays Confirmed.
         # A sent reboot that is not confirmed yet stays offered, so approving Reboot again can confirm it.

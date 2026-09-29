@@ -392,8 +392,7 @@ function Get-WizardKbGroups {
         $group = $groups[$key]
         $group.Rows += $row
         $group.RowIndexes += $index
-        $system = Get-PatchValue (Get-PatchValue $row.VmRecord @('agentStatus') $null) @('system') $null
-        $osName = ([string](Get-PatchValue $system @('osName') '')) -replace '^Microsoft ', ''
+        $osName = ([string](Get-PatchValue $row.VmRecord @('osName') '')) -replace '^Microsoft ', ''
         if ($osName -and $osName -notin $group.OsNames) { $group.OsNames += $osName }
     }
     return @($groups.Values)
