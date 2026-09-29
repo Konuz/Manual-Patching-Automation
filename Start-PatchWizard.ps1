@@ -370,6 +370,7 @@ function Refresh-WizardSelectionGrid {
         $labelText = if ($labels.Count -gt 0) { $labels -join ', ' } else { 'Standard update' }
         $index = $grid.Rows.Add([bool]$row.Selected,
             $row.VmName,
+            (@(Get-PatchArray (Get-PatchValue $record @('kbArticleIds') @())) -join ', '),
             [string](Get-PatchValue $record @('updateId') ''),
             [int64](Get-PatchValue $record @('revisionNumber') 0),
             [string](Get-PatchValue $record @('title') ''),
@@ -1386,8 +1387,8 @@ public class PatchWizardRowComparer : IComparer {
     $checkColumn.ReadOnly = $false
     $checkColumn.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic
     [void]$selectGrid.Columns.Add($checkColumn)
-    $selectHeaders = @('VM', 'UpdateID', 'Revision', 'Title', 'Type', 'Labels')
-    $selectWidths = @(170, 280, 80, 350, 90, 180)
+    $selectHeaders = @('VM', 'KB', 'UpdateID', 'Revision', 'Title', 'Type', 'Labels')
+    $selectWidths = @(170, 110, 280, 80, 350, 90, 180)
     for ($i = 0; $i -lt $selectHeaders.Count; $i++) {
         $column = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
         $column.HeaderText = $selectHeaders[$i]
