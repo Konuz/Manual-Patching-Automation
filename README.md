@@ -1,28 +1,21 @@
 # Windows Patch Wizard
 
-Windows Patch Wizard is a PowerShell 5.1 WinForms operator tool for scanning, selecting, installing, rebooting, and verifying Windows Server updates on vSphere virtual machines through vCenter Guest Operations. It keeps each run's decisions and evidence in a dedicated run folder and never writes credentials to that folder.
+A PowerShell 5.1 WinForms operator tool for scanning, selecting, installing, rebooting, and verifying Windows Server updates on vSphere VMs through vCenter Guest Operations. Each run keeps its decisions and evidence in a run folder; credentials are never written there.
 
 ## Requirements and launch
 
-Run the launcher from **64-bit Windows PowerShell 5.1** on the control workstation:
+Run from **64-bit Windows PowerShell 5.1** on the control workstation:
 
 ```powershell
 Set-Location '<repository folder>'
 & .\Start-PatchWizard.ps1
 ```
 
-The workstation needs:
-
-- VMware PowerCLI, including `VMware.VimAutomation.Core`, importable in Windows PowerShell 5.1.
-- The Windows `curl.exe` client (`%SystemRoot%\System32\curl.exe`) for ESXi Guest Operations file transfers; another curl on PATH is not used.
-- VMware Tools running in every target VM.
-- vCenter and guest credentials with the permissions required for inventory, Guest Operations, file transfer, process start, and the requested update actions.
-
-The guest must have Windows PowerShell 5.1 and the local Windows Update Agent available. The tool does not use WinRM and does not change the configured Windows Update source.
+The workstation needs VMware PowerCLI (`VMware.VimAutomation.Core`) importable in PowerShell 5.1 and the Windows `%SystemRoot%\System32\curl.exe` (another curl on PATH is not used). Every target VM needs running VMware Tools, Windows PowerShell 5.1 and the local Windows Update Agent. The vCenter and guest accounts need the rights for inventory, Guest Operations, file transfer, process start, and the update actions. The tool does not use WinRM and does not change the Windows Update source.
 
 ## VM input
 
-Type VM entries into the Settings page, or use **Load text file**. One VM per line, in any of these forms:
+Type VM entries in Settings or use **Load text file**, one per line:
 
 ```text
 APP-01
@@ -30,92 +23,73 @@ app-02.example.test
 DMZ-WEB|dmz-web.dmz.local
 ```
 
-Enter one or more vCenters in **vCenter server(s)**, separated by commas. Each VM is looked up on all of them and bound to the one that has it; a name found on more than one vCenter is blocked. Only a powered-on VM with running VMware Tools counts, so a powered-off copy of the same name (e.g. a replication placeholder) does not block it.
+Enter one or more vCenters, separated by commas. Each VM is looked up on all of them and bound to the one that has it; a name found on more than one vCenter is blocked. Only a powered-on VM with running VMware Tools counts, so a powered-off copy (e.g. a replication placeholder) does not block it. A name must resolve to exactly one VM; an FQDN that is not a VM name is looked up by its short name. An FQDN, when given, must be reported by VMware Tools.
 
-A name must resolve to exactly one VM. An FQDN that is not a VM name is looked up by its short name (`app-02`). The FQDN is optional; when one is given, VMware Tools must report it, otherwise the VM is blocked.
+## Credentials
 
-## Guest credentials
+One vCenter credential is used for every vCenter; a vCenter that rejects it gets its own prompt. Before the first action the wizard finds the VMs (vCenter credential only) and groups them by the DNS suffix VMware Tools reports: VMs of one domain share one guest credential prompt, and a VM without a suffix (typically a DMZ server) gets its own. The group is shown in the **Account group** column.
 
-One vCenter credential is asked for and used for every vCenter (typical with shared SSO). If a vCenter rejects it, the wizard asks for a separate credential for that vCenter only.
-
-Before the first action, the wizard finds the VMs in vCenter (vCenter credentials only) and groups them by the DNS suffix VMware Tools reports:
-
-- VMs with the same suffix (e.g. `example.test`) share one prompt: **Guest credential for domain example.test**.
-- A VM without a suffix, typically a DMZ server with its own local administrator, gets its own prompt.
-- If a domain credential is rejected on only some VMs of that domain (e.g. DMZ servers that share the DNS suffix), **Retry** asks for those VMs one by one. If it is rejected on all of them, the domain password is asked again.
-
-The groups are shown in the **Account group** column and saved in `run.json`; the credentials are kept in memory only and asked again after **Resume run**.
+If the guest rejects a credential, the wizard offers **Retry**, **Skip these VMs** for the rest of the run, or **Stop**. If a domain credential is rejected on only some VMs of the domain, Retry asks for those VMs one by one. Every rejected logon counts toward the account's lockout threshold, so a credential rejected on two VMs of its group (and accepted by none) is not tried on the others in that step. Credentials are kept in memory only and asked again after **Resume run**.
 
 ## Operator workflow
 
-The wizard presents six steps. Actions that can change a guest require a separate explicit approval in the corresponding step. Below the tabs, every step except Settings shows the VM table (status, current action, offered updates, reboot, cluster membership, errors, account group). The window content (fields, buttons, fonts, tabs) scales with the window size. Clicking a column header of any list sorts it A-Z, a second click Z-A, and a third click restores the original order; rows with equal values keep their original order, and a sorted VM table stays sorted while statuses change.
+Six steps; every action that can change a guest needs its own approval. Below the tabs, every step except Settings shows the VM table. The window content scales with the window size. Clicking a column header sorts a list A-Z, then Z-A, then back to the original order; equal values keep their order.
 
-1. **Settings** — choose the vCenter(s), VM entries, run folder, and concurrency. Create a new run or choose **Resume run**.
-2. **Scan** — start the scan. The guest reports offered updates, pending reboot state, and cluster membership (the **Cluster** column: `NotMember`, `Member` or `Unknown`; an unknown state is also written to `errors.log`).
-3. **Select updates** — the upper list shows every offered KB once, with its operating systems and VM count; its check box checks or unchecks that KB on every VM (a partly selected KB shows a mixed state). Monthly cumulative updates have a separate KB for each Windows version, so excluding a faulty month means one row per version. An update without a KB (typically a driver) is its own row. The lower per-VM list, including optional updates and drivers, handles single VMs. The selected `UpdateID + RevisionNumber` values are then approved for installation. The KB and operating system come from the scan, so a run scanned by an older agent version needs a new scan to show them.
-4. **Install** — approve installation. The agent searches again and installs only the still-offered selected revisions. The agent does not reboot the guest. An install that reaches its time limit may still be running: later install batches wait (`PendingInstallLimit`) until approving Install again observes it to the end. A completed install runs once per round (`SkippedInstalledThisRound` afterwards); updates found later, e.g. by Verify, are installed in another round. An install the agent reported as failed may be approved again.
-5. **Reboot** — review the VMs with fresh reboot evidence and approve the reboot batch separately. The next batch waits for a newer boot time and running VMware Tools.
-6. **Verify** — start a fresh scan, then start another operator-selected round or finish the run with the remaining updates listed.
+1. **Settings** — vCenter(s), VM entries, run folder, concurrency. Create a new run or **Resume run**.
+2. **Scan** — the guest reports offered updates, pending reboot, and cluster membership (**Cluster**: `NotMember`, `Member` or `Unknown`).
+3. **Select updates** — the upper list shows each offered KB once with its operating systems and VM count; its check box checks or unchecks the KB on every VM (a mixed state means partly selected). Monthly cumulative updates have a separate KB per Windows version, so excluding a faulty month takes one row per version. An update without a KB (typically a driver) is its own row. The lower list changes single VMs. KB and OS come from the scan; a run scanned by an older agent needs a new scan.
+4. **Install** — the agent searches again, installs only the still-offered selected `UpdateID + RevisionNumber` pairs, and never reboots. An install past its time limit may still run: later batches wait (`PendingInstallLimit`) until approving Install again observes it. One install per round (`SkippedInstalledThisRound`); updates found later go to another round. A failed install may be approved again.
+5. **Reboot** — only VMs with fresh reboot evidence; the next batch waits for a newer boot time and running VMware Tools.
+6. **Verify** — a fresh scan, then another round or finish the run.
 
-The Install and Reboot approvals show the number of VMs (and updates) and a scrollable list of every VM with what will happen to it. In the Install approval, clicking a VM opens a box below the list with its selected updates (KB and title); for a VM whose install already started it says the install is only observed. Enter does not approve: **Yes** needs its own click.
+The Install and Reboot approvals list every VM with what will happen to it. In the Install approval, clicking a VM shows its selected updates (or that a started install is only observed). Enter does not approve: **Yes** needs its own click.
 
-The wizard does not automatically repeat a round, resend an uncertain install, or send a second reboot after an interrupted run. A final agent result must match its `runId`, `stepId`, mode, and have a parseable `finishedAt`. A reboot counts as done only when the guest reports a boot time newer than the one saved before the reboot was sent.
+The wizard never repeats a round, resends an uncertain install, or sends a second reboot on its own. An agent result counts only if it matches its `runId`, `stepId` and mode and has a `finishedAt`; a reboot counts only when the guest reports a newer boot time. A failed or excluded VM (wrong name, FQDN mismatch, cluster member) is skipped and the others continue. Cluster members and VMs with an unknown cluster state (`ExcludedCluster`, also in `errors.log`) are never installed or rebooted. Only a reboot sent but not confirmed stops the next reboot batches.
 
-A failed or excluded VM (wrong name, FQDN mismatch, cluster member) is recorded and skipped; the other VMs continue. Cluster members (`ExcludedCluster`) are not offered for install or reboot; an unknown cluster state is also written to `errors.log`. Only a reboot that was sent but not confirmed stops the next reboot batches.
-
-If a started install or reboot has no final result (for example, the guest was restarted during installation), that VM is blocked for further installs and reboots, and **Start another round** stays disabled. Check the guest manually (agent log, Windows Update history, last boot time), then use **Mark steps reviewed** on the Verify tab. A reviewed reboot is not offered again until a new scan reports a pending reboot. A reboot that is only slow to confirm (e.g. a long cumulative update) does not need a review: approving **Reboot** again only waits again for a newer boot time and never sends a second reboot.
-
-If the guest rejects the credential, the wizard asks: **Retry** with a new credential, **Skip these VMs** for the rest of the run, or **Stop**. Every rejected logon of a domain account counts toward its lockout threshold, so a credential rejected on two VMs of its group (and accepted by none) is not tried on the group's other VMs in that step; they are listed in the same dialog.
+A started install or reboot without a final result (e.g. the guest restarted during installation) blocks that VM's installs and reboots and **Start another round**. Check the guest (agent log, update history, boot time), then use **Mark steps reviewed** on the Verify tab. A reboot that is only slow to confirm needs no review: approving **Reboot** again only waits again and never sends a second reboot.
 
 ## Certificate choices
 
-Settings contains two independent, unchecked-by-default options:
+Two independent options, unchecked by default and saved with the run:
 
-- **Ignore vCenter certificate** changes PowerCLI's certificate handling for the current vCenter session.
-- **Ignore ESXi certificates for file transfers** adds the insecure curl option only to ESXi transfer calls. All guest file transfers, including the boot-time check, use `curl.exe`.
+- **Ignore vCenter certificate** — PowerCLI certificate handling for the vCenter session only.
+- **Ignore ESXi certificates for file transfers** — adds the insecure option to `curl.exe` ESXi transfers only (all guest file transfers, including the boot-time check, use `curl.exe`).
 
-Enabling one option does not enable the other. Ignoring a certificate means the server identity is not verified. The choices are saved in the run state and summary so a resumed run keeps the same settings.
+An ignored certificate means the server identity is not verified.
 
-## Runs, logs, resume, and credentials
+## Runs, logs and resume
 
-Each run is stored under `runs/<runId>/` (or the output folder selected in Settings). A new run starts with `run.json`. During actions, `run.log` is appended, `errors.log` is created when an error is recorded, per-VM status and agent log files appear when an agent step runs, and `summary.md` and `summary.csv` are created or refreshed whenever the controller writes a summary. A skipped VM or a newly created run therefore may not have every file. Use **Open logs** in the wizard or open the run folder directly.
+Each run is stored in `runs/<runId>/` (or the chosen output folder): `run.json`, `run.log`, `errors.log` (when an error occurs), per-VM `status-*.json` and `agent-*.log`, and `summary.md` / `summary.csv`. **Open logs** opens the folder. Passwords and credential objects never reach these files.
 
-Each guest keeps the agent copy, `status.json` and `agent.log` under `%ProgramData%\WindowsPatchWizard\<runId>` as evidence; the wizard does not delete them, so remove that folder when the run is no longer needed.
+Each guest keeps the agent, `status.json` and `agent.log` in `%ProgramData%\WindowsPatchWizard\<runId>` as evidence; delete that folder when the run is no longer needed.
 
-Use **Resume run** to continue an interrupted run. If an action was interrupted, the wizard observes the installs and reboots it had already started; VMs it had not started yet are shown as `SkippedNotStarted` and need a new approval of that step. Credentials are requested again and kept in memory only; passwords, secure strings, and credential objects are excluded from `run.json`, logs, and summaries.
+**Resume run** continues an interrupted run: installs and reboots already started are observed, not started again; VMs not started yet are `SkippedNotStarted` and need a new approval.
 
 ## Offline verification
-
-Run the focused checks from 64-bit Windows PowerShell 5.1:
 
 ```powershell
 & .\tests\Invoke-CoreChecks.ps1
 ```
 
-The six checks cover the key behaviours named in the plan: selecting the right VM, excluding cluster members, installing only approved `UpdateID + RevisionNumber` pairs, writing errors and the summary, independent certificate options, and no second install or reboot after resume. They use local doubles only and do not connect to vCenter, query WUA, install updates, or reboot a VM.
+Six checks with local doubles only (no vCenter, WUA, install or reboot): selecting the right VM, excluding cluster members, installing only approved `UpdateID + RevisionNumber` pairs, writing errors and the summary, independent certificate options, and no second install or reboot after resume.
 
-## Safe nonproduction pilot
+## Nonproduction pilot
 
-Before production use:
+Use a disposable, nonproduction VM first, and confirm:
 
-1. Confirm the PowerShell 5.1 bitness, PowerCLI import, curl availability, vCenter access, guest permissions, and running VMware Tools.
-2. Select one disposable, nonproduction VM and enter its exact name (optionally with its expected FQDN).
-3. Run Scan, review the offered updates and cluster state, select a small approved set, then approve Install.
-4. Review per-update results and approve Reboot only when the wizard reports fresh pending reboot evidence.
-5. Complete Verify and inspect the files written for the run, including `run.log`, any `errors.log`, per-step `status-*.json` and `agent-*.log`, `summary.md`, and `summary.csv`.
-6. Repeat the pilot after closing the GUI during Install and after reboot dispatch; use Resume run and confirm that the existing step is observed instead of started again.
-7. Enter a wrong guest password once and confirm that the Retry / Skip these VMs / Stop dialog appears.
-8. With two vCenters, confirm that each VM shows the vCenter it was found on (in `summary.csv`) and that a vCenter with a different password asks for its own credential.
-9. With a list that mixes domain VMs and a DMZ VM, confirm the **Account group** column and that one credential is asked per domain and one for the DMZ VM.
-10. Confirm that the guest account runs the agent with full administrator rights through Guest Operations: the first Install must report per-update results, not an access-denied error. With UAC, a local administrator other than the built-in Administrator may get a restricted token (not verified yet).
-11. With **Ignore ESXi certificates for file transfers** unchecked, confirm that file transfers work. The Windows `curl.exe` also checks certificate revocation, which may fail for internal ESXi/VMCA certificates (curl exit code 35 in `errors.log`; not verified yet).
-12. Confirm the guest policies let the agent run: a Group Policy execution policy of `AllSigned` overrides `-ExecutionPolicy Bypass` (a scan or install ends as NeedsReview without `status.json`; a reboot is not sent and ends as `PendingRebootConfirmation` after the confirmation limit, which also stops later reboot batches), and Constrained Language Mode or AppLocker blocks the cluster check (every VM shows cluster state `Unknown`).
-13. From the control workstation, confirm name resolution of the ESXi hosts and HTTPS (port 443) to them; file transfers go directly to the host that runs the VM.
-14. Enter one VM by its FQDN only and one VM whose name contains `[` or `]`; confirm both are found (PowerCLI `Get-VM -Name` is a wildcard filter; the name is escaped).
-15. Stop one vCenter (or block it) and confirm the message: an unreachable vCenter stops the lookup for the whole run, and a run's vCenter list cannot be changed, so a new run is needed.
-16. With VMs on two vCenters and a long install, confirm that the VMs of the second vCenter are still observed after the wait (its session is idle meanwhile; an expired session shows as NeedsReview "could not be observed" and approving the step again observes it).
-17. Reboot a domain VM and watch the confirmation: a guest login right after the restart (VMware Tools up, domain logon not yet) must not be reported as a rejected credential; if it is, note it for a fix.
-18. Approve a reboot on a VM that already has a restart scheduled (e.g. `shutdown /r /t 3600`): `shutdown.exe` should return 1190 and the step should wait for a newer boot time (and hold back the next batch) instead of failing.
-19. Check the Windows Update policy of the target servers: automatic installation or scheduled restarts (e.g. Automatic Updates option 4) can install updates or restart a guest between the wizard's steps; the wizard does not change that policy, and a restart it did not send shows up as NeedsReview.
-
-Do not use a production VM for the first pilot. Cluster members and VMs with an unknown cluster state remain blocked for install and reboot.
+1. PowerShell bitness, PowerCLI import, curl, vCenter access, guest permissions, running VMware Tools.
+2. Scan, a small selection, Install, per-update results; Reboot only with fresh reboot evidence; Verify; the files in the run folder.
+3. Closing the GUI during Install and after a reboot was sent, then **Resume run**: the started step is observed, not started again.
+4. A wrong guest password shows Retry / Skip these VMs / Stop.
+5. With two vCenters: each VM shows its vCenter (`summary.csv`), and a vCenter with another password asks for its own credential.
+6. Domain VMs mixed with a DMZ VM: the **Account group** column and one prompt per domain plus one for the DMZ VM.
+7. The guest account runs the agent with full administrator rights: the first Install reports per-update results, not access denied (UAC may restrict a non-built-in local administrator; not verified yet).
+8. File transfers work with **Ignore ESXi certificates** unchecked (curl revocation checks may fail for internal VMCA certificates, exit code 35; not verified yet).
+9. Guest policies: `AllSigned` execution policy overrides `-ExecutionPolicy Bypass` (the step ends as NeedsReview without `status.json`; a reboot is not sent), and Constrained Language Mode or AppLocker blocks the cluster check (every VM `Unknown`).
+10. Name resolution of the ESXi hosts and HTTPS (443) to them from the workstation; transfers go directly to the VM's host.
+11. A VM entered by FQDN only and one whose name contains `[` or `]` are both found.
+12. An unreachable vCenter stops the lookup for the whole run; a run's vCenter list cannot be changed.
+13. With two vCenters and a long install, the second vCenter's VMs are still observed afterwards (an expired session shows NeedsReview; approving again observes it).
+14. After a domain VM reboots, a login before domain logon is ready is not reported as a rejected credential.
+15. A reboot on a VM with a restart already scheduled (`shutdown /r /t 3600`): `shutdown.exe` returns 1190 and the step waits for a newer boot time instead of failing.
+16. The servers' Windows Update policy: automatic installation or scheduled restarts can act between the wizard's steps; a restart the wizard did not send shows as NeedsReview.
