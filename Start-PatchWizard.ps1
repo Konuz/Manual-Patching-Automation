@@ -9,6 +9,9 @@ param(
 
 $script:WizardRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:ControllerPath = Join-Path $script:WizardRoot 'scripts\RunController.ps1'
+# Written only with "Save and encrypt credentials"; Export-Clixml encrypts the passwords with DPAPI,
+# so only the same Windows user on the same computer can read them.
+$script:CredentialFile = Join-Path $env:APPDATA 'WindowsPatchWizard\credentials.xml'
 $script:Wizard = @{
     Form = $null
     Tabs = $null
@@ -227,8 +230,7 @@ function New-WizardRun {
         $entries = ConvertTo-WizardVmEntries -Text $script:Wizard.Controls.VmEntries.Text
         $script:Wizard.RunState = New-PatchRun -Config $config -VMEntries $entries
         $script:Wizard.RunPath = [string](Get-PatchValue $script:Wizard.RunState @('runPath') '')
-        $script:Wizard.VCenterCredentials = @{}
-        $script:Wizard.GuestCredentials = @{}
+        Import-WizardCredentials
         $script:Wizard.UpdateRows = @()
         $script:Wizard.Controls.OpenLogs.Enabled = $true
         $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}{1}The run keeps the settings it was created with; edited fields apply only to a New patch run.' -f $script:Wizard.RunPath, [Environment]::NewLine)
@@ -242,6 +244,41 @@ function New-WizardRun {
     }
 }
 
+function Import-WizardCredentials {
+    $script:Wizard.VCenterCredentials = @{}
+    $script:Wizard.GuestCredentials = @{}
+    if (-not $script:Wizard.Controls.SaveCredentials.Checked -or -not (Test-Path -LiteralPath $script:CredentialFile)) { return }
+    try {
+        foreach ($entry in @(Import-Clixml -LiteralPath $script:CredentialFile)) {
+            $table = if ($entry.Kind -eq 'VCenter') { $script:Wizard.VCenterCredentials } else { $script:Wizard.GuestCredentials }
+            $table[[string]$entry.Name] = New-Object System.Management.Automation.PSCredential([string]$entry.UserName, $entry.Password)
+        }
+        Set-WizardStatus -Message ('Saved credentials loaded: {0} vCenter, {1} guest.' -f $script:Wizard.VCenterCredentials.Count, $script:Wizard.GuestCredentials.Count)
+    }
+    catch {
+        $script:Wizard.VCenterCredentials = @{}
+        $script:Wizard.GuestCredentials = @{}
+        Set-WizardStatus -Message ('Saved credentials could not be read; they will be asked for again: {0}' -f $_.Exception.Message)
+    }
+}
+
+function Save-WizardCredentials {
+    # One entry per credential; the password stays a SecureString, which Export-Clixml encrypts.
+    if (-not $script:Wizard.Controls.SaveCredentials.Checked) { return }
+    $entries = @(
+        foreach ($name in $script:Wizard.VCenterCredentials.Keys) { [pscustomobject]@{ Kind = 'VCenter'; Name = $name; UserName = $script:Wizard.VCenterCredentials[$name].UserName; Password = $script:Wizard.VCenterCredentials[$name].Password } }
+        foreach ($name in $script:Wizard.GuestCredentials.Keys) { [pscustomobject]@{ Kind = 'Guest'; Name = $name; UserName = $script:Wizard.GuestCredentials[$name].UserName; Password = $script:Wizard.GuestCredentials[$name].Password } }
+    )
+    try {
+        if ($entries.Count -eq 0) { Remove-Item -LiteralPath $script:CredentialFile -Force -ErrorAction SilentlyContinue; return }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $script:CredentialFile) -Force | Out-Null
+        $entries | Export-Clixml -LiteralPath $script:CredentialFile -ErrorAction Stop
+    }
+    catch {
+        Set-WizardStatus -Message ('Credentials could not be saved: {0}' -f $_.Exception.Message)
+    }
+}
+
 function Request-WizardCredential {
     # '*' is the credential for every vCenter; a vCenter that rejects it gets its own (see Complete-WizardAction).
     param([string]$VCenter = '*')
@@ -250,12 +287,15 @@ function Request-WizardCredential {
     $credential = Get-Credential -Message $message
     if ($null -eq $credential) { return }
     $script:Wizard.VCenterCredentials[$VCenter] = $credential
-    Set-WizardStatus -Message ('vCenter credential for {0} held in memory.' -f $VCenter)
+    Save-WizardCredentials
+    Set-WizardStatus -Message ('vCenter credential for {0} entered.' -f $VCenter)
 }
 
 function Request-WizardGuestCredentials {
     # Asks once per credential group that has no credential yet: one prompt per domain (DNS suffix),
-    # one per VM without a suffix (e.g. DMZ servers with a local administrator). Memory only.
+    # one per VM without a suffix (e.g. DMZ servers with a local administrator).
+    # Saving also drops a rejected credential that the caller removed from memory.
+    Save-WizardCredentials
     $vms = @(Get-PatchArray $script:Wizard.RunState.vms | Where-Object { $_.status -ne 'SkippedGuestAccount' -and -not [string]::IsNullOrWhiteSpace([string]$_.accountGroup) })
     foreach ($group in @($vms | ForEach-Object { [string]$_.accountGroup } | Sort-Object -Unique)) {
         if ($script:Wizard.GuestCredentials.ContainsKey($group)) { continue }
@@ -264,7 +304,8 @@ function Request-WizardGuestCredentials {
         $credential = Get-Credential -Message $message
         if ($null -eq $credential) { return $false }
         $script:Wizard.GuestCredentials[$group] = $credential
-        Set-WizardStatus -Message ('Guest credential for {0} held in memory.' -f $group)
+        Save-WizardCredentials
+        Set-WizardStatus -Message ('Guest credential for {0} entered.' -f $group)
     }
     return $true
 }
@@ -285,9 +326,8 @@ function Resume-WizardRun {
         Write-PatchSummary -RunPath $dialog.FileName -RunState $state
         $script:Wizard.RunState = $state
         $script:Wizard.RunPath = $dialog.FileName
-        # Credentials are never saved; they are asked for again when the next action starts.
-        $script:Wizard.VCenterCredentials = @{}
-        $script:Wizard.GuestCredentials = @{}
+        # Without saved credentials they are asked for again when the next action starts.
+        Import-WizardCredentials
         $script:Wizard.UpdateRows = @()
         Set-WizardSettingsFromRun -RunState $state
         $script:Wizard.Controls.OpenLogs.Enabled = $true
@@ -1404,6 +1444,22 @@ public class PatchWizardRowComparer : IComparer {
     $ignoreEsxi.Text = 'Ignore ESXi certificates for file transfers'
     $ignoreEsxi.Location = New-Object System.Drawing.Point(280, 420)
     $ignoreEsxi.Size = New-Object System.Drawing.Size(330, 25)
+    $saveCredentials = New-Object System.Windows.Forms.CheckBox
+    $saveCredentials.Text = 'Save and encrypt credentials'
+    $saveCredentials.Location = New-Object System.Drawing.Point(640, 420)
+    $saveCredentials.Size = New-Object System.Drawing.Size(260, 25)
+    $saveCredentials.Checked = (Test-Path -LiteralPath $script:CredentialFile)
+    $saveCredentials.Add_CheckedChanged({
+        if ($script:Wizard.Controls.SaveCredentials.Checked) {
+            Save-WizardCredentials
+            Set-WizardStatus -Message 'Credentials entered from now on are saved encrypted for your Windows account on this computer.'
+        }
+        else {
+            Remove-Item -LiteralPath $script:CredentialFile -Force -ErrorAction SilentlyContinue
+            Set-WizardStatus -Message 'Saved credentials deleted; credentials are kept in memory only.'
+        }
+    })
+    $toolTip.SetToolTip($saveCredentials, ('Remembers the vCenter and guest credentials in {0}, encrypted with Windows DPAPI: only your Windows account on this computer can read them. Unchecking deletes the file.' -f $script:CredentialFile))
     $certificateHint = New-WizardLabel -Text 'Both options are independent and unchecked by default. Ignoring a certificate means the server identity is not verified.' -X 10 -Y 448 -Width 850 -Height 38
     $certificateHint.ForeColor = [System.Drawing.Color]::DarkRed
 
@@ -1419,7 +1475,7 @@ public class PatchWizardRowComparer : IComparer {
     $resume.Add_Click({ Resume-WizardRun })
     $runPathLabel = New-WizardLabel -Text 'No active run' -X 310 -Y 505 -Width 690 -Height 44
     $runPathLabel.ForeColor = [System.Drawing.Color]::DimGray
-    $settingsPanel.Controls.AddRange(@($vcLabel, $vcText, $vmLabel, $vmHint, $vmText, $loadFile, $outputLabel, $outputText, $browseOutput, $concurrencyLabel, $scanConcurrency, $installConcurrencyLabel, $installConcurrency, $rebootBatchLabel, $rebootBatch, $advancedToggle, $advancedPanel, $ignoreVc, $ignoreEsxi, $certificateHint, $newRun, $resume, $runPathLabel))
+    $settingsPanel.Controls.AddRange(@($vcLabel, $vcText, $vmLabel, $vmHint, $vmText, $loadFile, $outputLabel, $outputText, $browseOutput, $concurrencyLabel, $scanConcurrency, $installConcurrencyLabel, $installConcurrency, $rebootBatchLabel, $rebootBatch, $advancedToggle, $advancedPanel, $ignoreVc, $ignoreEsxi, $saveCredentials, $certificateHint, $newRun, $resume, $runPathLabel))
 
     $scanTab = New-Object System.Windows.Forms.TabPage
     $scanTab.Text = 'Scan'
@@ -1651,6 +1707,7 @@ public class PatchWizardRowComparer : IComparer {
         RebootLimit = $rebootLimit
         IgnoreVCenter = $ignoreVc
         IgnoreEsxi = $ignoreEsxi
+        SaveCredentials = $saveCredentials
         AdvancedToggle = $advancedToggle
         AdvancedPanel = $advancedPanel
         OpenLogs = $openLogs
@@ -1713,7 +1770,7 @@ public class PatchWizardRowComparer : IComparer {
         if ($null -ne $script:Wizard.Timer) { $script:Wizard.Timer.Stop() }
     })
 
-    Set-WizardStatus -Message 'Create or resume a run. Credentials are requested only into memory.'
+    Set-WizardStatus -Message 'Create or resume a run.'
     return $form
 }
 
