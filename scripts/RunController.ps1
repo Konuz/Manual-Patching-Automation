@@ -177,7 +177,12 @@ function Read-PatchRun {
     if (-not (Test-Path -LiteralPath $jsonPath -PathType Leaf)) {
         throw ('The patch run was not found: {0}' -f $jsonPath)
     }
-    $content = Get-Content -LiteralPath $jsonPath -Raw -ErrorAction Stop
+    # The controller replaces run.json while the window reads it (and antivirus may open the new file), so a read
+    # that hits that moment is retried for up to about two seconds, like the replace in Write-PatchTextAtomic.
+    for ($attempt = 1; ; $attempt++) {
+        try { $content = [System.IO.File]::ReadAllText($jsonPath, (New-Object System.Text.UTF8Encoding($false))); break }
+        catch [System.IO.IOException] { if ($attempt -ge 20) { throw }; Start-Sleep -Milliseconds 100 }
+    }
     if ([string]::IsNullOrWhiteSpace($content)) {
         throw ('The patch run is empty: {0}' -f $jsonPath)
     }
