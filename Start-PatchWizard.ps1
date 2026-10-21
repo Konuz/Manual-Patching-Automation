@@ -1144,6 +1144,20 @@ function Set-WizardGridScaling {
     $Grid.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::AutoSize
     # Header text stays on one line (see Set-WizardGridMinimumWidths for the scroll bar).
     $Grid.ColumnHeadersDefaultCellStyle.WrapMode = [System.Windows.Forms.DataGridViewTriState]::False
+    # Dragging a column border switches the grid from shared widths to fixed widths, so a widened column
+    # gets a horizontal scroll bar instead of squeezing the others. Raised before the grid starts the resize;
+    # 6 px is the grid's own column sizing zone on either side of a border.
+    $Grid.Add_MouseDown({
+        param($sender, $eventArgs)
+        if ($sender.AutoSizeColumnsMode -ne [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill) { return }
+        $hit = $sender.HitTest($eventArgs.X, $eventArgs.Y)
+        if ($hit.Type -ne [System.Windows.Forms.DataGridViewHitTestType]::ColumnHeader) { return }
+        $right = $hit.ColumnX + $sender.Columns[$hit.ColumnIndex].Width
+        if ($right - $eventArgs.X -ge 6 -and ($eventArgs.X - $hit.ColumnX -ge 6 -or $hit.ColumnIndex -eq 0)) { return }
+        $widths = @($sender.Columns | ForEach-Object { $_.Width })
+        $sender.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
+        for ($i = 0; $i -lt $widths.Count; $i++) { $sender.Columns[$i].Width = $widths[$i] }
+    })
     # A header click sorts A-Z, then Z-A, then back to the source order (see Switch-WizardGridSort).
     $Grid.Add_ColumnHeaderMouseClick({
         param($sender, $eventArgs)
@@ -1501,39 +1515,45 @@ public class PatchWizardRowComparer : IComparer {
     $vmPanel = New-Object System.Windows.Forms.Panel
     $vmPanel.Dock = [System.Windows.Forms.DockStyle]::Bottom
     $vmPanel.Height = 198
-    # A thin frame like the tab area's border: the outer panel in the border colour shows 1 px around the white inner panel.
-    $vmPanel.Padding = New-Object System.Windows.Forms.Padding(1)
-    $vmPanel.BackColor = [System.Drawing.Color]::FromArgb(222, 222, 222)
     $vmPanel.Visible = $false
+    # A thin frame like the tab area's border: a panel in the border colour shows 1 px around the white inner panel.
+    $vmFrame = New-Object System.Windows.Forms.Panel
+    $vmFrame.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $vmFrame.Padding = New-Object System.Windows.Forms.Padding(1)
+    $vmFrame.BackColor = [System.Drawing.Color]::FromArgb(222, 222, 222)
     $vmInner = New-Object System.Windows.Forms.Panel
     $vmInner.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $vmInner.Padding = New-Object System.Windows.Forms.Padding(3, 0, 3, 3)
+    $vmInner.Padding = New-Object System.Windows.Forms.Padding(3)
     $vmInner.BackColor = [System.Drawing.SystemColors]::Window
     $vmInner.Controls.Add($vmGrid)
-    $vmPanel.Controls.Add($vmInner)
+    $vmFrame.Controls.Add($vmInner)
+    $vmPanel.Controls.Add($vmFrame)
     $vmGrid.MultiSelect = $true
-    # Dragging the bar on the top edge of the VM table (between it and the tabs) changes the table height (the
-    # tabs keep at least 150 px). The zoom recomputes bounds from the reference layout, so the new height is
-    # stored there divided by the zoom factor.
+    # Dragging the bar between the tabs and the framed VM table changes the table height (the tabs keep at
+    # least 150 px). The bar is a thin line in a slightly taller grab area. The zoom recomputes bounds from the
+    # reference layout, so the new height is stored there divided by the zoom factor.
     $vmSplitter = New-Object System.Windows.Forms.Panel
     $vmSplitter.Dock = [System.Windows.Forms.DockStyle]::Top
-    $vmSplitter.Height = 4
-    $vmSplitter.BackColor = [System.Drawing.SystemColors]::ControlDark
-    $vmSplitter.Cursor = [System.Windows.Forms.Cursors]::HSplit
-    $vmSplitter.Add_MouseDown({
+    $vmSplitter.Height = 9
+    $vmSplitter.Padding = New-Object System.Windows.Forms.Padding(0, 3, 0, 3)
+    $vmSplitterLine = New-Object System.Windows.Forms.Panel
+    $vmSplitterLine.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $vmSplitterLine.BackColor = [System.Drawing.SystemColors]::ControlDark
+    $vmSplitter.Controls.Add($vmSplitterLine)
+    $onVmResizeStart = {
         param($sender, $eventArgs)
         if ($eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
         $panel = $script:Wizard.Controls.VmPanel
         $script:Wizard.VmResize = @{ StartY = [System.Windows.Forms.Control]::MousePosition.Y; StartHeight = $panel.Height; MaxHeight = $panel.Height + $script:Wizard.Tabs.Height - 150 }
         $sender.Capture = $true
-    })
-    $vmSplitter.Add_MouseMove({
+    }
+    $onVmResizeMove = {
         $resize = $script:Wizard.VmResize
         if ($null -eq $resize) { return }
         $height = $resize.StartHeight - ([System.Windows.Forms.Control]::MousePosition.Y - $resize.StartY)
         $script:Wizard.Controls.VmPanel.Height = [int][Math]::Max(80, [Math]::Min($resize.MaxHeight, $height))
-    })
-    $vmSplitter.Add_MouseUp({
+    }
+    $onVmResizeEnd = {
         param($sender, $eventArgs)
         if ($null -eq $script:Wizard.VmResize) { return }
         $script:Wizard.VmResize = $null
@@ -1543,8 +1563,14 @@ public class PatchWizardRowComparer : IComparer {
         if ($null -eq $base) { return }
         $bounds = $base.Bounds
         $base.Bounds = New-Object System.Drawing.Rectangle($bounds.X, $bounds.Y, $bounds.Width, [int]($panel.Height / $script:Wizard.ScaleFactor))
-    })
-    $vmInner.Controls.Add($vmSplitter)
+    }
+    foreach ($part in @($vmSplitter, $vmSplitterLine)) {
+        $part.Cursor = [System.Windows.Forms.Cursors]::HSplit
+        $part.Add_MouseDown($onVmResizeStart)
+        $part.Add_MouseMove($onVmResizeMove)
+        $part.Add_MouseUp($onVmResizeEnd)
+    }
+    $vmPanel.Controls.Add($vmSplitter)
     $vmGrid.Add_SelectionChanged({ if (-not $script:Wizard.UpdatingGrid) { Show-WizardVmUpdates } })
     [void]$tabs.TabPages.Add($scanTab)
 

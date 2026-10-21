@@ -33,7 +33,7 @@ If the guest rejects a credential, the wizard offers **Retry**, **Skip these VMs
 
 ## Operator workflow
 
-Six steps; every action that can change a guest needs its own approval. Below the tabs, every step except Settings shows the VM table; drag the bar above it to change its height. The window content scales with the window size. Clicking a column header sorts a list A-Z, then Z-A, then back to the original order; equal values keep their order.
+Six steps; every action that can change a guest needs its own approval. Below the tabs, every step except Settings shows the VM table; drag the bar between it and the tabs to change its height. Dragging a column border in any list gives the list fixed column widths, with a horizontal scroll bar when they no longer fit. The window content scales with the window size. Clicking a column header sorts a list A-Z, then Z-A, then back to the original order; equal values keep their order.
 
 1. **Settings** — vCenter(s), VM entries, run folder, concurrency. Create a new run or **Resume run**.
 2. **Scan** — the guest reports offered updates, pending reboot, and cluster membership (**Cluster**: `NotMember`, `Member` or `Unknown`).
