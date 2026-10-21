@@ -353,11 +353,21 @@ function Get-WizardUpdateRowsFromState {
 
 function Refresh-WizardSelectionGrid {
     if ($null -eq $script:Wizard.Controls.SelectGrid) { return }
-    $grid = $script:Wizard.Controls.SelectGrid
     $script:Wizard.UpdateRows = @(Get-WizardUpdateRowsFromState)
+    Show-WizardVmUpdates
+    Refresh-WizardKbGrid
+}
+
+function Show-WizardVmUpdates {
+    # The right list shows only the updates of the VM selected in the VM table below the tabs.
+    $grid = $script:Wizard.Controls.SelectGrid
+    $currentRow = $script:Wizard.Controls.VmGrid.CurrentRow
+    $vmName = if ($null -eq $currentRow) { '' } else { [string]$currentRow.Cells[0].Value }
+    $script:Wizard.Controls.VmUpdatesLabel.Text = if ($vmName) { 'Updates of VM {0}:' -f $vmName } else { 'Select a VM in the table below to see its updates.' }
     $grid.Rows.Clear()
     for ($i = 0; $i -lt $script:Wizard.UpdateRows.Count; $i++) {
         $row = $script:Wizard.UpdateRows[$i]
+        if ($row.VmName -ne $vmName) { continue }
         $record = $row.Update
         $type = [string](Get-PatchValue $record @('type') 'Unknown')
         $browseOnly = [bool](Get-PatchValue $record @('browseOnly') $false)
@@ -368,7 +378,6 @@ function Refresh-WizardSelectionGrid {
         if (-not $eulaAccepted) { $labels += 'EULA required' }
         $labelText = if ($labels.Count -gt 0) { $labels -join ', ' } else { 'Standard update' }
         $index = $grid.Rows.Add([bool]$row.Selected,
-            $row.VmName,
             (@(Get-PatchArray (Get-PatchValue $record @('kbArticleIds') @())) -join ', '),
             [string](Get-PatchValue $record @('updateId') ''),
             [int64](Get-PatchValue $record @('revisionNumber') 0),
@@ -378,7 +387,6 @@ function Refresh-WizardSelectionGrid {
         $grid.Rows[$index].Tag = $i
     }
     Set-WizardGridSort -Grid $grid
-    Refresh-WizardKbGrid
 }
 
 function Get-WizardKbGroups {
@@ -455,8 +463,9 @@ function Refresh-WizardVmGrid {
     $grid = $script:Wizard.Controls.VmGrid
     $vms = @(Get-PatchArray (Get-PatchValue $script:Wizard.RunState @('vms') @()))
     $script:Wizard.UpdatingGrid = $true
+    $rebuilt = $grid.Rows.Count -ne $vms.Count
     try {
-        if ($grid.Rows.Count -ne $vms.Count) {
+        if ($rebuilt) {
             $grid.Rows.Clear()
             for ($i = 0; $i -lt $vms.Count; $i++) {
                 # Counts are numbers so that they sort as numbers.
@@ -486,6 +495,8 @@ function Refresh-WizardVmGrid {
     finally {
         $script:Wizard.UpdatingGrid = $false
     }
+    # New rows move the selection, so the right list of Select updates follows it.
+    if ($rebuilt) { Show-WizardVmUpdates }
 }
 
 function Get-WizardPendingRebootVms {
@@ -1431,6 +1442,7 @@ public class PatchWizardRowComparer : IComparer {
     $vmPanel.BackColor = [System.Drawing.SystemColors]::Window
     $vmPanel.Visible = $false
     $vmPanel.Controls.Add($vmGrid)
+    $vmGrid.Add_SelectionChanged({ if (-not $script:Wizard.UpdatingGrid) { Show-WizardVmUpdates } })
     [void]$tabs.TabPages.Add($scanTab)
 
     $selectTab = New-Object System.Windows.Forms.TabPage
@@ -1445,7 +1457,7 @@ public class PatchWizardRowComparer : IComparer {
         try { Save-WizardSelections }
         catch { Show-WizardError -Message $_.Exception.Message }
     })
-    $selectHint = New-WizardLabel -Text 'All offered updates are selected initially. The upper list checks or unchecks a KB on every VM (each Windows version has its own cumulative update KB); the lower list changes single VMs.' -X 8 -Y 37 -Width 1000 -Height 26
+    $selectHint = New-WizardLabel -Text 'All offered updates are selected initially. The left list checks or unchecks a KB on every VM (each Windows version has its own cumulative update KB); the right list shows the VM selected in the table below and changes only that VM.' -X 8 -Y 37 -Width 1000 -Height 26
     $selectHint.ForeColor = [System.Drawing.Color]::DimGray
     $selectHint.Dock = [System.Windows.Forms.DockStyle]::Top
     $selectGrid = New-Object System.Windows.Forms.DataGridView
@@ -1463,8 +1475,8 @@ public class PatchWizardRowComparer : IComparer {
     $checkColumn.ReadOnly = $false
     $checkColumn.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic
     [void]$selectGrid.Columns.Add($checkColumn)
-    $selectHeaders = @('VM', 'KB', 'UpdateID', 'Revision', 'Title', 'Type', 'Labels')
-    $selectWidths = @(170, 110, 280, 80, 350, 90, 180)
+    $selectHeaders = @('KB', 'UpdateID', 'Revision', 'Title', 'Type', 'Labels')
+    $selectWidths = @(110, 280, 80, 350, 90, 180)
     for ($i = 0; $i -lt $selectHeaders.Count; $i++) {
         $column = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
         $column.HeaderText = $selectHeaders[$i]
@@ -1491,8 +1503,7 @@ public class PatchWizardRowComparer : IComparer {
     })
     # One row per KB; read-only, so its check box changes only through CellClick.
     $kbGrid = New-Object System.Windows.Forms.DataGridView
-    $kbGrid.Dock = [System.Windows.Forms.DockStyle]::Top
-    $kbGrid.Height = 200
+    $kbGrid.Dock = [System.Windows.Forms.DockStyle]::Fill
     $kbGrid.AllowUserToAddRows = $false
     $kbGrid.AllowUserToDeleteRows = $false
     $kbGrid.MultiSelect = $false
@@ -1520,11 +1531,23 @@ public class PatchWizardRowComparer : IComparer {
         if ($eventArgs.RowIndex -lt 0 -or $eventArgs.ColumnIndex -ne 0) { return }
         Set-WizardKbGroupSelected -Index ([int]$script:Wizard.Controls.KbGrid.Rows[$eventArgs.RowIndex].Tag)
     })
-    $perVmLabel = New-WizardLabel -Text 'Per VM:' -X 8 -Y 0 -Width 1000 -Height 22
-    $perVmLabel.Dock = [System.Windows.Forms.DockStyle]::Top
-    $selectPanel.Controls.Add($selectGrid)
-    $selectPanel.Controls.Add($perVmLabel)
-    $selectPanel.Controls.Add($kbGrid)
+    # Two columns: every KB once on the left, the updates of the VM selected below on the right.
+    $kbLabel = New-WizardLabel -Text 'All VMs (one row per KB):' -X 0 -Y 0 -Width 600 -Height 22
+    $kbLabel.Dock = [System.Windows.Forms.DockStyle]::Top
+    $kbPanel = New-Object System.Windows.Forms.Panel
+    $kbPanel.Dock = [System.Windows.Forms.DockStyle]::Left
+    $kbPanel.Width = 600
+    $kbPanel.Controls.Add($kbGrid)
+    $kbPanel.Controls.Add($kbLabel)
+    $vmUpdatesLabel = New-WizardLabel -Text 'Select a VM in the table below to see its updates.' -X 0 -Y 0 -Width 600 -Height 22
+    $vmUpdatesLabel.Dock = [System.Windows.Forms.DockStyle]::Top
+    $vmUpdatesPanel = New-Object System.Windows.Forms.Panel
+    $vmUpdatesPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $vmUpdatesPanel.Padding = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
+    $vmUpdatesPanel.Controls.Add($selectGrid)
+    $vmUpdatesPanel.Controls.Add($vmUpdatesLabel)
+    $selectPanel.Controls.Add($vmUpdatesPanel)
+    $selectPanel.Controls.Add($kbPanel)
     $selectPanel.Controls.Add($selectHint)
     $selectPanel.Controls.Add($saveSelection)
     $selectTab.Controls.Add($selectPanel)
@@ -1636,6 +1659,7 @@ public class PatchWizardRowComparer : IComparer {
         VmGrid = $vmGrid
         SelectGrid = $selectGrid
         KbGrid = $kbGrid
+        VmUpdatesLabel = $vmUpdatesLabel
         RebootGrid = $rebootGrid
         RebootButton = $rebootButton
         ScanButton = $scanButton
@@ -1670,6 +1694,8 @@ public class PatchWizardRowComparer : IComparer {
     $tabs.Add_SelectedIndexChanged({
         $script:Wizard.Controls.VmGrid.Parent.Visible = ($script:Wizard.Tabs.SelectedIndex -ne 0)
         Update-WizardScale
+        # The VM table gets its first selected row only once it is shown.
+        if ($script:Wizard.Tabs.SelectedIndex -eq 2) { Show-WizardVmUpdates }
     })
 
     $timer = New-Object System.Windows.Forms.Timer
