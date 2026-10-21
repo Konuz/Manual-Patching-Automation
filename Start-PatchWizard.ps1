@@ -40,6 +40,7 @@ $script:Wizard = @{
     Stretch = @{}
     OutlineSizing = $null
     ScaleFactor = 1.0
+    VmResize = $null
 }
 
 $savedPreference = $ErrorActionPreference
@@ -1505,15 +1506,32 @@ public class PatchWizardRowComparer : IComparer {
     $vmPanel.Visible = $false
     $vmPanel.Controls.Add($vmGrid)
     $vmGrid.MultiSelect = $true
-    # Dragging the bar above the VM table changes the table height. The zoom recomputes bounds from the
-    # reference layout, so the new height is stored there (divided by the current zoom factor).
-    $vmSplitter = New-Object System.Windows.Forms.Splitter
+    # Dragging the bar above the VM table changes the table height (the tabs keep at least 150 px). The zoom
+    # recomputes bounds from the reference layout, so the new height is stored there divided by the zoom factor.
+    $vmSplitter = New-Object System.Windows.Forms.Panel
     $vmSplitter.Dock = [System.Windows.Forms.DockStyle]::Bottom
-    $vmSplitter.Height = 6
-    $vmSplitter.MinSize = 80
-    $vmSplitter.MinExtra = 150
+    $vmSplitter.Height = 8
+    $vmSplitter.BackColor = [System.Drawing.SystemColors]::ControlDark
+    $vmSplitter.Cursor = [System.Windows.Forms.Cursors]::HSplit
     $vmSplitter.Visible = $false
-    $vmSplitter.Add_SplitterMoved({
+    $vmSplitter.Add_MouseDown({
+        param($sender, $eventArgs)
+        if ($eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+        $panel = $script:Wizard.Controls.VmGrid.Parent
+        $script:Wizard.VmResize = @{ StartY = [System.Windows.Forms.Control]::MousePosition.Y; StartHeight = $panel.Height; MaxHeight = $panel.Height + $script:Wizard.Tabs.Height - 150 }
+        $sender.Capture = $true
+    })
+    $vmSplitter.Add_MouseMove({
+        $resize = $script:Wizard.VmResize
+        if ($null -eq $resize) { return }
+        $height = $resize.StartHeight - ([System.Windows.Forms.Control]::MousePosition.Y - $resize.StartY)
+        $script:Wizard.Controls.VmGrid.Parent.Height = [int][Math]::Max(80, [Math]::Min($resize.MaxHeight, $height))
+    })
+    $vmSplitter.Add_MouseUp({
+        param($sender, $eventArgs)
+        if ($null -eq $script:Wizard.VmResize) { return }
+        $script:Wizard.VmResize = $null
+        $sender.Capture = $false
         $panel = $script:Wizard.Controls.VmGrid.Parent
         $base = $script:Wizard.BaseLayout[$panel]
         if ($null -eq $base) { return }
