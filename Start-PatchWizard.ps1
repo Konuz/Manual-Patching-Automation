@@ -504,6 +504,26 @@ function Set-WizardKbGroupSelected {
     Update-WizardStepState
 }
 
+function Get-WizardVmStatusText {
+    # Readable text for the VM table; run.json, logs and the summary keep the status names.
+    param($VM)
+    $status = [string](Get-PatchValue $VM @('status') 'Pending')
+    switch ($status) {
+        'Started' {
+            switch ([string](Get-PatchValue $VM @('currentAction') '')) {
+                'Install' { return 'Installing (waiting for the result)' }
+                'Reboot' { return 'Rebooting (waiting for a newer boot time)' }
+                default { return 'Scanning' }
+            }
+        }
+        'Confirmed' { return 'Rebooted (confirmed)' }
+        'PendingRebootConfirmation' { return 'Reboot sent, not confirmed in time' }
+        'PendingRebootBarrier' { return 'Reboot held: an earlier reboot is not confirmed' }
+        'PendingInstallLimit' { return 'Install held: an earlier install has no result' }
+    }
+    return $status
+}
+
 function Refresh-WizardVmGrid {
     if ($null -eq $script:Wizard.Controls.VmGrid) { return }
     $grid = $script:Wizard.Controls.VmGrid
@@ -525,8 +545,11 @@ function Refresh-WizardVmGrid {
             $reboot = Get-PatchValue $vm @('reboot') $null
             $gridRow.Cells[0].Value = [string](Get-PatchValue $vm @('vmName') '')
             $gridRow.Cells[1].Value = [string](Get-PatchValue $vm @('expectedFqdn') '')
-            $gridRow.Cells[2].Value = [string](Get-PatchValue $vm @('status') 'Pending')
-            $gridRow.Cells[3].Value = [string](Get-PatchValue $vm @('currentAction') '')
+            $gridRow.Cells[2].Value = Get-WizardVmStatusText -VM $vm
+            # Only while the running action has no result for this VM yet.
+            $vmAction = [string](Get-PatchValue $vm @('currentAction') '')
+            $running = [string](Get-PatchValue $script:Wizard.RunState @('status') '') -eq 'Running' -and $vmAction -ne [string](Get-PatchValue $vm @('lastProcessedAction') '')
+            $gridRow.Cells[3].Value = $(if ($running) { $vmAction } else { '' })
             $gridRow.Cells[4].Value = $updates.Count
             $gridRow.Cells[5].Value = [string](Get-PatchValue $reboot @('status') 'NotRequested')
             # Cluster membership from the last agent status; empty until the VM is scanned.
