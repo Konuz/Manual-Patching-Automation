@@ -1501,19 +1501,19 @@ public class PatchWizardRowComparer : IComparer {
     $vmPanel = New-Object System.Windows.Forms.Panel
     $vmPanel.Dock = [System.Windows.Forms.DockStyle]::Bottom
     $vmPanel.Height = 198
-    $vmPanel.Padding = New-Object System.Windows.Forms.Padding(4)
+    $vmPanel.Padding = New-Object System.Windows.Forms.Padding(4, 0, 4, 4)
     $vmPanel.BackColor = [System.Drawing.SystemColors]::Window
     $vmPanel.Visible = $false
     $vmPanel.Controls.Add($vmGrid)
     $vmGrid.MultiSelect = $true
-    # Dragging the bar above the VM table changes the table height (the tabs keep at least 150 px). The zoom
-    # recomputes bounds from the reference layout, so the new height is stored there divided by the zoom factor.
+    # Dragging the bar on the top edge of the VM table (between it and the tabs) changes the table height (the
+    # tabs keep at least 150 px). The zoom recomputes bounds from the reference layout, so the new height is
+    # stored there divided by the zoom factor.
     $vmSplitter = New-Object System.Windows.Forms.Panel
-    $vmSplitter.Dock = [System.Windows.Forms.DockStyle]::Bottom
-    $vmSplitter.Height = 8
+    $vmSplitter.Dock = [System.Windows.Forms.DockStyle]::Top
+    $vmSplitter.Height = 4
     $vmSplitter.BackColor = [System.Drawing.SystemColors]::ControlDark
     $vmSplitter.Cursor = [System.Windows.Forms.Cursors]::HSplit
-    $vmSplitter.Visible = $false
     $vmSplitter.Add_MouseDown({
         param($sender, $eventArgs)
         if ($eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
@@ -1538,6 +1538,7 @@ public class PatchWizardRowComparer : IComparer {
         $bounds = $base.Bounds
         $base.Bounds = New-Object System.Drawing.Rectangle($bounds.X, $bounds.Y, $bounds.Width, [int]($panel.Height / $script:Wizard.ScaleFactor))
     })
+    $vmPanel.Controls.Add($vmSplitter)
     $vmGrid.Add_SelectionChanged({ if (-not $script:Wizard.UpdatingGrid) { Show-WizardVmUpdates } })
     [void]$tabs.TabPages.Add($scanTab)
 
@@ -1729,12 +1730,9 @@ public class PatchWizardRowComparer : IComparer {
     $statusPanel.Controls.AddRange(@($statusLabel, $progressLabel, $progress, $statusText))
     $form.Controls.Add($statusPanel)
     $form.Controls.Add($vmPanel)
-    $form.Controls.Add($vmSplitter)
-    # Docking goes from the highest index down: header, status, VM table, the bar above it, then the tabs fill the rest.
-    $form.Controls.SetChildIndex($header, 4)
-    $form.Controls.SetChildIndex($statusPanel, 3)
-    $form.Controls.SetChildIndex($vmPanel, 2)
-    $form.Controls.SetChildIndex($vmSplitter, 1)
+    $form.Controls.SetChildIndex($header, 3)
+    $form.Controls.SetChildIndex($statusPanel, 2)
+    $form.Controls.SetChildIndex($vmPanel, 1)
     $form.Controls.SetChildIndex($tabs, 0)
 
     $script:Wizard.Controls = @{
@@ -1757,7 +1755,6 @@ public class PatchWizardRowComparer : IComparer {
         RunPathLabel = $runPathLabel
         ResumeButton = $resume
         VmGrid = $vmGrid
-        VmSplitter = $vmSplitter
         SelectGrid = $selectGrid
         KbGrid = $kbGrid
         VmUpdatesLabel = $vmUpdatesLabel
@@ -1794,7 +1791,6 @@ public class PatchWizardRowComparer : IComparer {
     # A hidden tab page gets its new size only when shown, so place its content again then.
     $tabs.Add_SelectedIndexChanged({
         $script:Wizard.Controls.VmGrid.Parent.Visible = ($script:Wizard.Tabs.SelectedIndex -ne 0)
-        $script:Wizard.Controls.VmSplitter.Visible = ($script:Wizard.Tabs.SelectedIndex -ne 0)
         Update-WizardScale
         # The VM table gets its first selected row only once it is shown.
         if ($script:Wizard.Tabs.SelectedIndex -eq 2) { Show-WizardVmUpdates }
