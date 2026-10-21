@@ -1502,6 +1502,7 @@ public class PatchWizardRowComparer : IComparer {
     $vmPanel.Dock = [System.Windows.Forms.DockStyle]::Bottom
     $vmPanel.Height = 198
     $vmPanel.Padding = New-Object System.Windows.Forms.Padding(4, 0, 4, 4)
+    $vmPanel.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
     $vmPanel.BackColor = [System.Drawing.SystemColors]::Window
     $vmPanel.Visible = $false
     $vmPanel.Controls.Add($vmGrid)
