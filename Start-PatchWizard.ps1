@@ -1502,7 +1502,12 @@ public class PatchWizardRowComparer : IComparer {
     $vmPanel.Dock = [System.Windows.Forms.DockStyle]::Bottom
     $vmPanel.Height = 198
     $vmPanel.Padding = New-Object System.Windows.Forms.Padding(4, 0, 4, 4)
-    $vmPanel.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    # A thin frame in the colour of the tab area's border; the panel is repainted on resize so it follows the zoom.
+    $vmPanel.Add_Paint({
+        param($sender, $eventArgs)
+        [System.Windows.Forms.ControlPaint]::DrawBorder($eventArgs.Graphics, $sender.ClientRectangle, [System.Drawing.SystemColors]::ControlDark, [System.Windows.Forms.ButtonBorderStyle]::Solid)
+    })
+    $vmPanel.Add_Resize({ param($sender) $sender.Invalidate() })
     $vmPanel.BackColor = [System.Drawing.SystemColors]::Window
     $vmPanel.Visible = $false
     $vmPanel.Controls.Add($vmGrid)
