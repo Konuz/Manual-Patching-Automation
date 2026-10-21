@@ -1501,16 +1501,16 @@ public class PatchWizardRowComparer : IComparer {
     $vmPanel = New-Object System.Windows.Forms.Panel
     $vmPanel.Dock = [System.Windows.Forms.DockStyle]::Bottom
     $vmPanel.Height = 198
-    $vmPanel.Padding = New-Object System.Windows.Forms.Padding(4, 0, 4, 4)
-    # A thin frame in the colour of the tab area's border; the panel is repainted on resize so it follows the zoom.
-    $vmPanel.Add_Paint({
-        param($sender, $eventArgs)
-        [System.Windows.Forms.ControlPaint]::DrawBorder($eventArgs.Graphics, $sender.ClientRectangle, [System.Drawing.SystemColors]::ControlDark, [System.Windows.Forms.ButtonBorderStyle]::Solid)
-    })
-    $vmPanel.Add_Resize({ param($sender) $sender.Invalidate() })
-    $vmPanel.BackColor = [System.Drawing.SystemColors]::Window
+    # A thin frame like the tab area's border: the outer panel in the border colour shows 1 px around the white inner panel.
+    $vmPanel.Padding = New-Object System.Windows.Forms.Padding(1)
+    $vmPanel.BackColor = [System.Drawing.Color]::FromArgb(222, 222, 222)
     $vmPanel.Visible = $false
-    $vmPanel.Controls.Add($vmGrid)
+    $vmInner = New-Object System.Windows.Forms.Panel
+    $vmInner.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $vmInner.Padding = New-Object System.Windows.Forms.Padding(3, 0, 3, 3)
+    $vmInner.BackColor = [System.Drawing.SystemColors]::Window
+    $vmInner.Controls.Add($vmGrid)
+    $vmPanel.Controls.Add($vmInner)
     $vmGrid.MultiSelect = $true
     # Dragging the bar on the top edge of the VM table (between it and the tabs) changes the table height (the
     # tabs keep at least 150 px). The zoom recomputes bounds from the reference layout, so the new height is
@@ -1523,7 +1523,7 @@ public class PatchWizardRowComparer : IComparer {
     $vmSplitter.Add_MouseDown({
         param($sender, $eventArgs)
         if ($eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
-        $panel = $script:Wizard.Controls.VmGrid.Parent
+        $panel = $script:Wizard.Controls.VmPanel
         $script:Wizard.VmResize = @{ StartY = [System.Windows.Forms.Control]::MousePosition.Y; StartHeight = $panel.Height; MaxHeight = $panel.Height + $script:Wizard.Tabs.Height - 150 }
         $sender.Capture = $true
     })
@@ -1531,20 +1531,20 @@ public class PatchWizardRowComparer : IComparer {
         $resize = $script:Wizard.VmResize
         if ($null -eq $resize) { return }
         $height = $resize.StartHeight - ([System.Windows.Forms.Control]::MousePosition.Y - $resize.StartY)
-        $script:Wizard.Controls.VmGrid.Parent.Height = [int][Math]::Max(80, [Math]::Min($resize.MaxHeight, $height))
+        $script:Wizard.Controls.VmPanel.Height = [int][Math]::Max(80, [Math]::Min($resize.MaxHeight, $height))
     })
     $vmSplitter.Add_MouseUp({
         param($sender, $eventArgs)
         if ($null -eq $script:Wizard.VmResize) { return }
         $script:Wizard.VmResize = $null
         $sender.Capture = $false
-        $panel = $script:Wizard.Controls.VmGrid.Parent
+        $panel = $script:Wizard.Controls.VmPanel
         $base = $script:Wizard.BaseLayout[$panel]
         if ($null -eq $base) { return }
         $bounds = $base.Bounds
         $base.Bounds = New-Object System.Drawing.Rectangle($bounds.X, $bounds.Y, $bounds.Width, [int]($panel.Height / $script:Wizard.ScaleFactor))
     })
-    $vmPanel.Controls.Add($vmSplitter)
+    $vmInner.Controls.Add($vmSplitter)
     $vmGrid.Add_SelectionChanged({ if (-not $script:Wizard.UpdatingGrid) { Show-WizardVmUpdates } })
     [void]$tabs.TabPages.Add($scanTab)
 
@@ -1761,6 +1761,7 @@ public class PatchWizardRowComparer : IComparer {
         RunPathLabel = $runPathLabel
         ResumeButton = $resume
         VmGrid = $vmGrid
+        VmPanel = $vmPanel
         SelectGrid = $selectGrid
         KbGrid = $kbGrid
         VmUpdatesLabel = $vmUpdatesLabel
@@ -1796,7 +1797,7 @@ public class PatchWizardRowComparer : IComparer {
     $form.Add_Resize({ Update-WizardScale })
     # A hidden tab page gets its new size only when shown, so place its content again then.
     $tabs.Add_SelectedIndexChanged({
-        $script:Wizard.Controls.VmGrid.Parent.Visible = ($script:Wizard.Tabs.SelectedIndex -ne 0)
+        $script:Wizard.Controls.VmPanel.Visible = ($script:Wizard.Tabs.SelectedIndex -ne 0)
         Update-WizardScale
         # The VM table gets its first selected row only once it is shown.
         if ($script:Wizard.Tabs.SelectedIndex -eq 2) { Show-WizardVmUpdates }
