@@ -39,6 +39,7 @@ $script:Wizard = @{
     BaseLayout = @{}
     Stretch = @{}
     OutlineSizing = $null
+    ScaleFactor = 1.0
 }
 
 $savedPreference = $ErrorActionPreference
@@ -399,15 +400,18 @@ function Refresh-WizardSelectionGrid {
 }
 
 function Show-WizardVmUpdates {
-    # The right list shows only the updates of the VM selected in the VM table below the tabs.
+    # The right list shows only the updates of the VMs selected in the VM table below the tabs.
     $grid = $script:Wizard.Controls.SelectGrid
-    $currentRow = $script:Wizard.Controls.VmGrid.CurrentRow
-    $vmName = if ($null -eq $currentRow) { '' } else { [string]$currentRow.Cells[0].Value }
-    $script:Wizard.Controls.VmUpdatesLabel.Text = if ($vmName) { 'Updates of VM {0}:' -f $vmName } else { 'Select a VM in the table below to see its updates.' }
+    $vmNames = @($script:Wizard.Controls.VmGrid.SelectedRows | ForEach-Object { [string]$_.Cells[0].Value })
+    $script:Wizard.Controls.VmUpdatesLabel.Text = switch ($vmNames.Count) {
+        0 { 'Select VMs in the table below to see their updates (Ctrl or Shift + click selects several).' }
+        1 { 'Updates of VM {0}:' -f $vmNames[0] }
+        default { 'Updates of {0} selected VMs:' -f $vmNames.Count }
+    }
     $grid.Rows.Clear()
     for ($i = 0; $i -lt $script:Wizard.UpdateRows.Count; $i++) {
         $row = $script:Wizard.UpdateRows[$i]
-        if ($row.VmName -ne $vmName) { continue }
+        if ($row.VmName -notin $vmNames) { continue }
         $record = $row.Update
         $type = [string](Get-PatchValue $record @('type') 'Unknown')
         $browseOnly = [bool](Get-PatchValue $record @('browseOnly') $false)
@@ -418,6 +422,7 @@ function Show-WizardVmUpdates {
         if (-not $eulaAccepted) { $labels += 'EULA required' }
         $labelText = if ($labels.Count -gt 0) { $labels -join ', ' } else { 'Standard update' }
         $index = $grid.Rows.Add([bool]$row.Selected,
+            $row.VmName,
             (@(Get-PatchArray (Get-PatchValue $record @('kbArticleIds') @())) -join ', '),
             [string](Get-PatchValue $record @('updateId') ''),
             [int64](Get-PatchValue $record @('revisionNumber') 0),
@@ -1218,6 +1223,7 @@ function Update-WizardScale {
     $form = $script:Wizard.Form
     if ($script:Wizard.BaseLayout.Count -eq 0 -or $form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) { return }
     $factor = [Math]::Min($form.ClientSize.Width / $script:Wizard.BaseClientSize.Width, $form.ClientSize.Height / $script:Wizard.BaseClientSize.Height)
+    $script:Wizard.ScaleFactor = $factor
     # Fonts are recreated only when the size changes by a visible step (0.25 pt).
     $fontSize = [float]([Math]::Round($script:Wizard.BaseFont.Size * $factor * 4) / 4)
     if ($fontSize -ne $form.Font.Size) {
@@ -1498,6 +1504,22 @@ public class PatchWizardRowComparer : IComparer {
     $vmPanel.BackColor = [System.Drawing.SystemColors]::Window
     $vmPanel.Visible = $false
     $vmPanel.Controls.Add($vmGrid)
+    $vmGrid.MultiSelect = $true
+    # Dragging the bar above the VM table changes the table height. The zoom recomputes bounds from the
+    # reference layout, so the new height is stored there (divided by the current zoom factor).
+    $vmSplitter = New-Object System.Windows.Forms.Splitter
+    $vmSplitter.Dock = [System.Windows.Forms.DockStyle]::Bottom
+    $vmSplitter.Height = 6
+    $vmSplitter.MinSize = 80
+    $vmSplitter.MinExtra = 150
+    $vmSplitter.Visible = $false
+    $vmSplitter.Add_SplitterMoved({
+        $panel = $script:Wizard.Controls.VmGrid.Parent
+        $base = $script:Wizard.BaseLayout[$panel]
+        if ($null -eq $base) { return }
+        $bounds = $base.Bounds
+        $base.Bounds = New-Object System.Drawing.Rectangle($bounds.X, $bounds.Y, $bounds.Width, [int]($panel.Height / $script:Wizard.ScaleFactor))
+    })
     $vmGrid.Add_SelectionChanged({ if (-not $script:Wizard.UpdatingGrid) { Show-WizardVmUpdates } })
     [void]$tabs.TabPages.Add($scanTab)
 
@@ -1513,7 +1535,7 @@ public class PatchWizardRowComparer : IComparer {
         try { Save-WizardSelections }
         catch { Show-WizardError -Message $_.Exception.Message }
     })
-    $selectHint = New-WizardLabel -Text 'All offered updates are selected initially. The left list checks or unchecks a KB on every VM (each Windows version has its own cumulative update KB); the right list shows the VM selected in the table below and changes only that VM.' -X 8 -Y 37 -Width 1000 -Height 26
+    $selectHint = New-WizardLabel -Text 'All offered updates are selected initially. The left list checks or unchecks a KB on every VM (each Windows version has its own cumulative update KB); the right list shows the VMs selected in the table below and changes only those VMs.' -X 8 -Y 37 -Width 1000 -Height 26
     $selectHint.ForeColor = [System.Drawing.Color]::DimGray
     $selectHint.Dock = [System.Windows.Forms.DockStyle]::Top
     $selectGrid = New-Object System.Windows.Forms.DataGridView
@@ -1531,8 +1553,8 @@ public class PatchWizardRowComparer : IComparer {
     $checkColumn.ReadOnly = $false
     $checkColumn.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic
     [void]$selectGrid.Columns.Add($checkColumn)
-    $selectHeaders = @('KB', 'UpdateID', 'Revision', 'Title', 'Type', 'Labels')
-    $selectWidths = @(110, 280, 80, 350, 90, 180)
+    $selectHeaders = @('VM', 'KB', 'UpdateID', 'Revision', 'Title', 'Type', 'Labels')
+    $selectWidths = @(150, 110, 280, 80, 350, 90, 180)
     for ($i = 0; $i -lt $selectHeaders.Count; $i++) {
         $column = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
         $column.HeaderText = $selectHeaders[$i]
@@ -1689,9 +1711,12 @@ public class PatchWizardRowComparer : IComparer {
     $statusPanel.Controls.AddRange(@($statusLabel, $progressLabel, $progress, $statusText))
     $form.Controls.Add($statusPanel)
     $form.Controls.Add($vmPanel)
-    $form.Controls.SetChildIndex($header, 3)
-    $form.Controls.SetChildIndex($statusPanel, 2)
-    $form.Controls.SetChildIndex($vmPanel, 1)
+    $form.Controls.Add($vmSplitter)
+    # Docking goes from the highest index down: header, status, VM table, the bar above it, then the tabs fill the rest.
+    $form.Controls.SetChildIndex($header, 4)
+    $form.Controls.SetChildIndex($statusPanel, 3)
+    $form.Controls.SetChildIndex($vmPanel, 2)
+    $form.Controls.SetChildIndex($vmSplitter, 1)
     $form.Controls.SetChildIndex($tabs, 0)
 
     $script:Wizard.Controls = @{
@@ -1714,6 +1739,7 @@ public class PatchWizardRowComparer : IComparer {
         RunPathLabel = $runPathLabel
         ResumeButton = $resume
         VmGrid = $vmGrid
+        VmSplitter = $vmSplitter
         SelectGrid = $selectGrid
         KbGrid = $kbGrid
         VmUpdatesLabel = $vmUpdatesLabel
@@ -1750,6 +1776,7 @@ public class PatchWizardRowComparer : IComparer {
     # A hidden tab page gets its new size only when shown, so place its content again then.
     $tabs.Add_SelectedIndexChanged({
         $script:Wizard.Controls.VmGrid.Parent.Visible = ($script:Wizard.Tabs.SelectedIndex -ne 0)
+        $script:Wizard.Controls.VmSplitter.Visible = ($script:Wizard.Tabs.SelectedIndex -ne 0)
         Update-WizardScale
         # The VM table gets its first selected row only once it is shown.
         if ($script:Wizard.Tabs.SelectedIndex -eq 2) { Show-WizardVmUpdates }
