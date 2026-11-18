@@ -673,7 +673,7 @@ function Get-PatchWaitDeadline {
 function Wait-PatchAgent {
     # Waits for the agent's final status.json. Read-GuestStatus accepts a final status only when its
     # runId, stepId and mode match this step and finishedAt is set; a missing process alone is not enough.
-    param($Context, $RunState, $VMRecord, $Step, [string]$RunPath, [int]$TimeoutMinutes)
+    param($Context, $RunState, $VMRecord, $Step, [string]$RunPath, [int]$TimeoutMinutes, $Server = $null, $GuestCredential = $null, [scriptblock]$ReconnectServer = $null, [switch]$PollOnce)
 
     $mode = [string]$Step.agentMode
     $localStatusPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step).status
@@ -684,6 +684,13 @@ function Wait-PatchAgent {
     $agentEnded = $false
     while ($true) {
         try {
+            if ($null -eq $Context) {
+                if ($null -eq $Server -or $null -eq $GuestCredential) {
+                    throw 'Cannot refresh guest context without a vCenter connection and guest credential.'
+                }
+                $vm = Get-PatchVM -Server $Server -Name $VMRecord.vmName -ExpectedFqdn $VMRecord.expectedFqdn -SavedId $VMRecord.vmId
+                $Context = Get-GuestContext -VM $vm -GuestCredential $GuestCredential
+            }
             $status = Read-GuestStatus -Context $Context -RunId $RunState.runId -StepId $Step.stepId -ExpectedMode $mode -LocalPath $localStatusPath -IgnoreEsxiCertificate $ignoreEsxi
             $state = [string](Get-PatchValue $status @('status') '')
             if ($state -eq 'Completed') {
@@ -710,9 +717,20 @@ function Wait-PatchAgent {
             }
         }
         catch {
+            if ($_.Exception -is [System.Security.Authentication.InvalidCredentialException]) { throw }
             $lastError = Protect-PatchText $_.Exception.Message
+            if ($null -ne $ReconnectServer -and (Test-PatchSessionExpired $_.Exception)) {
+                try { $Server = & $ReconnectServer } catch { }
+            }
+            $Context = $null
+            if ($agentEnded) {
+                return [pscustomobject]@{ status = 'NeedsReview'; agentStatus = $null; error = ('The guest agent process ended without writing a final status.json. Last read error: ' + $lastError) }
+            }
         }
         if ((Get-Date).ToUniversalTime() -ge $deadline) { break }
+        if ($PollOnce) {
+            return [pscustomobject]@{ status = 'Running'; agentStatus = $null; error = $lastError; running = $true }
+        }
         Start-Sleep -Seconds 10
     }
     $message = 'The guest agent did not report a final result before the time limit; it may still be running.'
@@ -722,8 +740,13 @@ function Wait-PatchAgent {
 
 function Receive-PatchAgentLog {
     # Copies the step's agent.log into the run folder. The final status stays authoritative when it cannot be copied.
-    param($Context, $RunState, $VMRecord, $Step, [string]$RunPath)
+    param($Context, $RunState, $VMRecord, $Step, [string]$RunPath, $Server = $null, $GuestCredential = $null)
     try {
+        if ($null -eq $Context -and $null -ne $Server -and $null -ne $GuestCredential) {
+            $vm = Get-PatchVM -Server $Server -Name $VMRecord.vmName -ExpectedFqdn $VMRecord.expectedFqdn -SavedId $VMRecord.vmId
+            $Context = Get-GuestContext -VM $vm -GuestCredential $GuestCredential
+        }
+        if ($null -eq $Context) { return }
         $guestLogPath = Join-Path (Get-PatchGuestPaths -Context $Context -RunState $RunState -Step $Step).directory 'agent.log'
         $localLogPath = (Get-PatchAgentLocalPaths -RunPath $RunPath -VMRecord $VMRecord -Step $Step).agentLog
         Receive-GuestFile -Context $Context -GuestPath $guestLogPath -LocalPath $localLogPath -IgnoreEsxiCertificate:(Test-PatchIgnoreEsxi $RunState) | Out-Null
@@ -740,7 +763,11 @@ function Invoke-PatchAgentStep {
         $VMRecord,
         $Context,
         [int]$TimeoutMinutes,
-        [switch]$StartOnly
+        [switch]$StartOnly,
+        $Server = $null,
+        $GuestCredential = $null,
+        [scriptblock]$ReconnectServer = $null,
+        [switch]$PollOnce
     )
 
     $round = [int]$VMRecord.currentRound
@@ -812,7 +839,10 @@ function Invoke-PatchAgentStep {
         return [pscustomobject]@{ status = 'Started'; step = $step; agentStatus = $null; error = $null }
     }
 
-    $waitResult = Wait-PatchAgent -Context $Context -RunState $RunState -VMRecord $VMRecord -Step $step -RunPath $RunPath -TimeoutMinutes $TimeoutMinutes
+    $waitResult = Wait-PatchAgent -Context $Context -RunState $RunState -VMRecord $VMRecord -Step $step -RunPath $RunPath -TimeoutMinutes $TimeoutMinutes -Server $Server -GuestCredential $GuestCredential -ReconnectServer $ReconnectServer -PollOnce:$PollOnce
+    if ([string]$waitResult.status -eq 'Running') {
+        return [pscustomobject]@{ status = 'Running'; step = $step; agentStatus = $null; error = $waitResult.error; running = $true }
+    }
     if ($Action -in @('Scan', 'Verify') -and $waitResult.status -eq 'Completed') {
         # An unrecognised cluster state blocks the VM and goes to the errors at once.
         $cluster = Get-PatchValue $waitResult.agentStatus @('cluster') $null
@@ -820,7 +850,7 @@ function Invoke-PatchAgentStep {
             $waitResult.error = 'The cluster state is unknown ({0}); install and reboot are blocked for this VM.' -f [string](Get-PatchValue $cluster @('reason') 'no reason reported')
         }
     }
-    Receive-PatchAgentLog -Context $Context -RunState $RunState -VMRecord $VMRecord -Step $step -RunPath $RunPath
+    Receive-PatchAgentLog -Context $Context -RunState $RunState -VMRecord $VMRecord -Step $step -RunPath $RunPath -Server $Server -GuestCredential $GuestCredential
     Set-PatchValue -InputObject $step -Name 'status' -Value $waitResult.status
     Update-PatchVmFromAgentStatus -Action $Action -VMRecord $VMRecord -Status $waitResult.agentStatus
     if ($null -ne $waitResult.error) { Set-PatchValue -InputObject $step -Name 'error' -Value (Protect-PatchText $waitResult.error) }
@@ -832,7 +862,7 @@ function Invoke-PatchAgentStep {
 function Wait-PatchReboot {
     # A reboot is confirmed only by a guest boot time newer than the baseline saved
     # before the reboot was sent. This function never sends a reboot.
-    param([string]$RunPath, $RunState, $VMRecord, $Step, $Server, $GuestCredential, [int]$TimeoutMinutes)
+    param([string]$RunPath, $RunState, $VMRecord, $Step, $Server, $GuestCredential, [int]$TimeoutMinutes, [scriptblock]$ReconnectServer = $null, [switch]$PollOnce)
 
     $baseline = [datetime]::Parse([string]$Step.baselineBootTime).ToUniversalTime()
     $ignoreEsxi = Test-PatchIgnoreEsxi $RunState
@@ -873,12 +903,18 @@ function Wait-PatchReboot {
             if ($_.Exception -is [System.Security.Authentication.InvalidCredentialException]) { throw }
             # Other errors are expected while the guest restarts.
             $lastError = Protect-PatchText $_.Exception.Message
+            if ($null -ne $ReconnectServer -and (Test-PatchSessionExpired $_.Exception)) {
+                try { $Server = & $ReconnectServer } catch { }
+            }
         }
         if ((Get-Date).ToUniversalTime() -ge $deadline) {
             $message = 'A newer guest boot time was not observed before the reboot confirmation limit.'
             if ($null -ne $lastError) { $message += ' Last error: ' + $lastError }
             $result = [pscustomobject]@{ status = 'PendingRebootConfirmation'; step = $Step; agentStatus = $null; error = $message }
             break
+        }
+        if ($PollOnce) {
+            return [pscustomobject]@{ status = 'Running'; step = $Step; agentStatus = $null; error = $lastError }
         }
         Start-Sleep -Seconds 10
     }
@@ -898,7 +934,9 @@ function Invoke-PatchVmAction {
         $VMRecord,
         $Server,
         $GuestCredential,
-        [switch]$StartOnly
+        [switch]$StartOnly,
+        [scriptblock]$ReconnectServer = $null,
+        [switch]$PollOnce
     )
 
     $round = [int]$VMRecord.currentRound
@@ -907,15 +945,37 @@ function Invoke-PatchVmAction {
         if ([bool](Get-PatchValue $rebootStep @('startAttempted') $false)) {
             # The reboot was already sent (possibly before the GUI was closed): only observe it.
             if ($StartOnly) { return [pscustomobject]@{ status = 'Started'; step = $rebootStep; agentStatus = $null; error = $null } }
-            return (Wait-PatchReboot -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Step $rebootStep -Server $Server -GuestCredential $GuestCredential -TimeoutMinutes (Get-PatchLimit $RunState 'rebootConfirmationTimeoutMinutes' 30))
+            return (Wait-PatchReboot -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Step $rebootStep -Server $Server -GuestCredential $GuestCredential -TimeoutMinutes (Get-PatchLimit $RunState 'rebootConfirmationTimeoutMinutes' 30) -ReconnectServer $ReconnectServer -PollOnce:$PollOnce)
         }
     }
 
-    # Get-PatchVM checks the name or saved ID, the FQDN when one is expected, power state and VMware Tools.
-    $vm = Get-PatchVM -Server $Server -Name $VMRecord.vmName -ExpectedFqdn $VMRecord.expectedFqdn -SavedId $VMRecord.vmId
-    Set-PatchVmBinding -VMRecord $VMRecord -VM $vm -VCenter $VMRecord.vCenter
-    Save-PatchDecision -RunPath $RunPath -RunState $RunState
-    $context = Get-GuestContext -VM $vm -GuestCredential $GuestCredential
+    $existingStep = Get-PatchLatestStep -VMRecord $VMRecord -Action $Action
+    $observeExisting = ($Action -ne 'Reboot') -and ($null -ne $existingStep) -and [bool](Get-PatchValue $existingStep @('startAttempted') $false) -and (
+        (($Action -eq 'Install') -and -not (Test-PatchMutatingStepReconciled -Step $existingStep)) -or
+        (($Action -in @('Scan', 'Verify')) -and -not $StartOnly -and [string]$existingStep.status -eq 'Started')
+    )
+    if ($observeExisting) {
+        if ($StartOnly) { return [pscustomobject]@{ status = 'Started'; step = $existingStep; agentStatus = $null; error = $null } }
+        $timeoutMinutes = Get-PatchLimit $RunState 'scanTimeoutMinutes' 30
+        if ($Action -eq 'Install') { $timeoutMinutes = Get-PatchLimit $RunState 'installTimeoutMinutes' 180 }
+        return (Invoke-PatchAgentStep -Action $Action -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Context $null -Server $Server -GuestCredential $GuestCredential -ReconnectServer $ReconnectServer -TimeoutMinutes $timeoutMinutes -PollOnce:$PollOnce)
+    }
+
+    $context = $null
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            # Get-PatchVM checks the name or saved ID, the FQDN when one is expected, power state and VMware Tools.
+            $vm = Get-PatchVM -Server $Server -Name $VMRecord.vmName -ExpectedFqdn $VMRecord.expectedFqdn -SavedId $VMRecord.vmId
+            Set-PatchVmBinding -VMRecord $VMRecord -VM $vm -VCenter $VMRecord.vCenter
+            Save-PatchDecision -RunPath $RunPath -RunState $RunState
+            $context = Get-GuestContext -VM $vm -GuestCredential $GuestCredential
+            break
+        }
+        catch {
+            if ($attempt -ge 2 -or $null -eq $ReconnectServer -or -not (Test-PatchSessionExpired $_.Exception)) { throw }
+            $Server = & $ReconnectServer
+        }
+    }
 
     if ($Action -eq 'Install' -or $Action -eq 'Reboot') {
         # Last scan result; the agent checks the cluster state again in the guest before acting.
@@ -931,11 +991,11 @@ function Invoke-PatchVmAction {
         }
         $started = Invoke-PatchAgentStep -Action 'Reboot' -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Context $context -StartOnly
         if ($StartOnly -or $started.status -ne 'Started') { return $started }
-        return (Wait-PatchReboot -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Step $started.step -Server $Server -GuestCredential $GuestCredential -TimeoutMinutes (Get-PatchLimit $RunState 'rebootConfirmationTimeoutMinutes' 30))
+        return (Wait-PatchReboot -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Step $started.step -Server $Server -GuestCredential $GuestCredential -TimeoutMinutes (Get-PatchLimit $RunState 'rebootConfirmationTimeoutMinutes' 30) -ReconnectServer $ReconnectServer -PollOnce:$PollOnce)
     }
     $timeoutMinutes = Get-PatchLimit $RunState 'scanTimeoutMinutes' 30
     if ($Action -eq 'Install') { $timeoutMinutes = Get-PatchLimit $RunState 'installTimeoutMinutes' 180 }
-    return (Invoke-PatchAgentStep -Action $Action -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Context $context -TimeoutMinutes $timeoutMinutes -StartOnly:$StartOnly)
+    return (Invoke-PatchAgentStep -Action $Action -RunPath $RunPath -RunState $RunState -VMRecord $VMRecord -Context $context -TimeoutMinutes $timeoutMinutes -StartOnly:$StartOnly -Server $Server -GuestCredential $GuestCredential -ReconnectServer $ReconnectServer -PollOnce:$PollOnce)
 }
 
 function Add-PatchVmResult {
@@ -1119,11 +1179,25 @@ function Invoke-PatchAction {
         Write-PatchSummary -RunPath $runFile -RunState $run
 
         # Only the vCenters that hold VMs of this run.
-        $connection = Connect-PatchVCenters -Names @($vmRecords | ForEach-Object { [string]$_.vCenter } | Where-Object { $_ } | Sort-Object -Unique) -Credentials $VCenterCredentials -IgnoreCertificate ([bool](Get-PatchOption $run @('ignoreVCenterCertificate') $false))
+        $ignoreVc = [bool](Get-PatchOption $run @('ignoreVCenterCertificate') $false)
+        $connection = Connect-PatchVCenters -Names @($vmRecords | ForEach-Object { [string]$_.vCenter } | Where-Object { $_ } | Sort-Object -Unique) -Credentials $VCenterCredentials -IgnoreCertificate $ignoreVc
         if ($connection.Rejected.Count -gt 0) {
             Set-PatchValue -InputObject $run -Name 'status' -Value 'Stopped'
             Save-PatchDecision -RunPath $runFile -RunState $run
             return [pscustomobject]@{ status = 'Stopped'; action = $Action; rejectedVCenters = $connection.Rejected; error = ('The credential was rejected by: {0}' -f ($connection.Rejected -join ', ')); vmResults = @() }
+        }
+        $getServer = {
+            param([string]$VCenterName, [switch]$ForceReconnect)
+            if ([string]::IsNullOrWhiteSpace($VCenterName)) { return $null }
+            $current = $connection.Servers[$VCenterName]
+            $disconnected = ($null -eq $current) -or ($null -ne $current.PSObject.Properties['IsConnected'] -and -not [bool]$current.IsConnected)
+            if ($ForceReconnect -or $disconnected) {
+                if ($null -ne $current) { Disconnect-PatchVCenter -Server $current }
+                $cred = if ($VCenterCredentials.ContainsKey($VCenterName)) { $VCenterCredentials[$VCenterName] } else { $VCenterCredentials['*'] }
+                $current = Connect-PatchVCenter -ServerName $VCenterName -Credential $cred -IgnoreVCenterCertificate $ignoreVc
+                $connection.Servers[$VCenterName] = $current
+            }
+            return $current
         }
 
         $rebootBarrier = $false
@@ -1137,7 +1211,7 @@ function Invoke-PatchAction {
         # get the same Retry / Skip / Stop choice. (One rejection alone may be a DMZ VM with its own account.)
         $credentialState = @{}
         $invokeVm = {
-            param($VMRecord, [bool]$StartOnly)
+            param($VMRecord, [bool]$StartOnly, [bool]$PollOnce = $false)
             $group = [string]$VMRecord.accountGroup
             $guestCredential = $GuestCredentials[$group]
             if ([string]::IsNullOrWhiteSpace($group)) {
@@ -1152,9 +1226,13 @@ function Invoke-PatchAction {
                 return [pscustomobject]@{ status = 'GuestCredentialRejected'; error = ('Not tried: the credential for {0} was rejected on {1}.' -f $group, ($groupState.rejectedOn -join ', ')) }
             }
             try {
-                $vmResult = Invoke-PatchVmAction -Action $Action -RunPath $runFile -RunState $run -VMRecord $VMRecord -Server $connection.Servers[[string]$VMRecord.vCenter] -GuestCredential $guestCredential -StartOnly:$StartOnly
-                # A result without an exception needed a guest login, except a reboot observation that timed out.
-                if ([string]$vmResult.status -ne 'PendingRebootConfirmation') { $groupState.accepted = $true }
+                $vcName = [string]$VMRecord.vCenter
+                $serverGetter = $getServer
+                $server = & $serverGetter $vcName
+                $reconnectServer = { & $serverGetter $vcName -ForceReconnect }.GetNewClosure()
+                $vmResult = Invoke-PatchVmAction -Action $Action -RunPath $runFile -RunState $run -VMRecord $VMRecord -Server $server -GuestCredential $guestCredential -StartOnly:$StartOnly -ReconnectServer $reconnectServer -PollOnce:$PollOnce
+                # A result without an exception needed a guest login, except a reboot observation that timed out or is still running.
+                if ([string]$vmResult.status -notin @('PendingRebootConfirmation', 'Running')) { $groupState.accepted = $true }
                 $vmResult
             }
             catch {
@@ -1243,10 +1321,17 @@ function Invoke-PatchAction {
                     $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result $result -RebootBarrier ([ref]$rebootBarrier)
                 }
             }
-            foreach ($vmRecord in $started) {
-                $result = & $invokeVm $vmRecord $false
-                if ($Action -eq 'Install' -and [bool](Get-PatchValue $result @('running') $false)) { $mayRun += [string]$vmRecord.vmName }
-                $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result $result -RebootBarrier ([ref]$rebootBarrier)
+            $pendingBatch = New-Object System.Collections.ArrayList
+            foreach ($vmRecord in $started) { [void]$pendingBatch.Add($vmRecord) }
+            while ($pendingBatch.Count -gt 0) {
+                foreach ($vmRecord in @($pendingBatch)) {
+                    $result = & $invokeVm $vmRecord $false $true
+                    if ([string]$result.status -eq 'Running') { continue }
+                    [void]$pendingBatch.Remove($vmRecord)
+                    if ($Action -eq 'Install' -and [bool](Get-PatchValue $result @('running') $false)) { $mayRun += [string]$vmRecord.vmName }
+                    $resultRows += Add-PatchVmResult -RunPath $runFile -RunState $run -VMRecord $vmRecord -Action $Action -Result $result -RebootBarrier ([ref]$rebootBarrier)
+                }
+                if ($pendingBatch.Count -gt 0) { Start-Sleep -Seconds 10 }
             }
             $installHold += $mayRun
         }

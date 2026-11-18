@@ -41,6 +41,19 @@ function Test-PatchLoginRejected {
     return $false
 }
 
+function Test-PatchSessionExpired {
+    # True when a vCenter SOAP session timed out or disconnected during a long run.
+    param([System.Exception]$Exception)
+    for ($current = $Exception; $null -ne $current; $current = $current.InnerException) {
+        $typeName = $current.GetType().FullName
+        if ($typeName -match 'NotAuthenticated|ServerNotConnected|ViServerConnection') { return $true }
+        $fault = $current.PSObject.Properties['MethodFault']
+        if ($null -ne $fault -and $null -ne $fault.Value -and $fault.Value.GetType().Name -eq 'NotAuthenticated') { return $true }
+        if ([string]$current.Message -match '(?i)session is not authenticated|not authenticated|not connected') { return $true }
+    }
+    return $false
+}
+
 function Get-GuestFault {
     # Returns the vSphere MethodFault behind a PowerCLI exception, or $null.
     param([System.Exception]$Exception)

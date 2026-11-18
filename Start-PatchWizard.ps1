@@ -28,6 +28,9 @@ $script:Wizard = @{
     ActiveAction = $null
     LastRunLog = ''
     LastRunReadError = ''
+    LastRunUpdatedAt = ''
+    LastRunWriteTicks = [int64]-1
+    LastRunLogWriteTicks = [int64]-1
     UpdatingGrid = $false
     UpdateRows = @()
     KbGroups = @()
@@ -234,6 +237,9 @@ function New-WizardRun {
         $script:Wizard.RunPath = [string](Get-PatchValue $script:Wizard.RunState @('runPath') '')
         Import-WizardCredentials
         $script:Wizard.UpdateRows = @()
+        $script:Wizard.LastRunUpdatedAt = ''
+        $script:Wizard.LastRunWriteTicks = [int64]-1
+        $script:Wizard.LastRunLogWriteTicks = [int64]-1
         $script:Wizard.Controls.OpenLogs.Enabled = $true
         $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}{1}The run keeps the settings it was created with; edited fields apply only to a New patch run.' -f $script:Wizard.RunPath, [Environment]::NewLine)
         Set-WizardStatus -Message ('Run {0} has been created. Go to the Scan tab and start the scan.' -f [string](Get-PatchValue $script:Wizard.RunState @('runId') ''))
@@ -332,6 +338,9 @@ function Resume-WizardRun {
         # Without saved credentials they are asked for again when the next action starts.
         Import-WizardCredentials
         $script:Wizard.UpdateRows = @()
+        $script:Wizard.LastRunUpdatedAt = ''
+        $script:Wizard.LastRunWriteTicks = [int64]-1
+        $script:Wizard.LastRunLogWriteTicks = [int64]-1
         Set-WizardSettingsFromRun -RunState $state
         $script:Wizard.Controls.OpenLogs.Enabled = $true
         $script:Wizard.Controls.RunPathLabel.Text = ('Run: {0}{1}The run keeps the settings it was created with; edited fields apply only to a New patch run.' -f $script:Wizard.RunPath, [Environment]::NewLine)
@@ -681,7 +690,11 @@ function Refresh-WizardRunLog {
     $logPath = Join-Path $directory 'run.log'
     if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { return }
     try {
+        $logItem = Get-Item -LiteralPath $logPath -ErrorAction Stop
+        $logTicks = [int64]$logItem.LastWriteTimeUtc.Ticks
+        if ($logTicks -eq $script:Wizard.LastRunLogWriteTicks) { return }
         $content = (Get-Content -LiteralPath $logPath -Tail 80 -ErrorAction Stop) -join [Environment]::NewLine
+        $script:Wizard.LastRunLogWriteTicks = $logTicks
         if ($content -ne $script:Wizard.LastRunLog) {
             $script:Wizard.LastRunLog = $content
             $script:Wizard.Controls.StatusText.Text = $content
@@ -955,6 +968,9 @@ function Start-WizardWorker {
     $script:Wizard.ActivePowerShell = $powerShell
     $script:Wizard.ActiveAsyncResult = $powerShell.BeginInvoke()
     $script:Wizard.ActiveAction = $Action
+    $script:Wizard.LastRunUpdatedAt = ''
+    $script:Wizard.LastRunWriteTicks = [int64]-1
+    $script:Wizard.LastRunLogWriteTicks = [int64]-1
     Set-WizardStatus -Message ('{0} is running in the background. The window remains responsive.' -f $Action)
     Update-WizardStepState
 }
@@ -1154,11 +1170,22 @@ function Refresh-WizardUi {
     # authoritative; re-reading it here would discard changes made behind an open dialog.
     if ($null -eq $script:Wizard.ActivePowerShell) { return }
     try {
-        $script:Wizard.RunState = Read-PatchRun -RunPath $script:Wizard.RunPath
+        $jsonPath = Get-PatchRunJsonPath -RunPath $script:Wizard.RunPath
+        $item = Get-Item -LiteralPath $jsonPath -ErrorAction Stop
+        $writeTicks = [int64]$item.LastWriteTimeUtc.Ticks
+        if ($writeTicks -ne $script:Wizard.LastRunWriteTicks) {
+            $state = Read-PatchRun -RunPath $jsonPath
+            $script:Wizard.RunState = $state
+            $script:Wizard.LastRunWriteTicks = $writeTicks
+            $updatedAt = [string](Get-PatchValue $state @('updatedAt') '')
+            if ($updatedAt -ne $script:Wizard.LastRunUpdatedAt) {
+                $script:Wizard.LastRunUpdatedAt = $updatedAt
+                Refresh-WizardVmGrid
+                Update-WizardProgress
+                Update-WizardStepState
+            }
+        }
         $script:Wizard.LastRunReadError = ''
-        Refresh-WizardVmGrid
-        Update-WizardProgress
-        Update-WizardStepState
         Refresh-WizardRunLog
     }
     catch {

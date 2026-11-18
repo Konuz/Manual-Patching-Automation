@@ -32,11 +32,21 @@ $script:Status = [ordered]@{
 }
 
 function Save-Status {
+    if (-not ('WindowsPatchWizard.FileMove' -as [type])) {
+        Add-Type -Namespace 'WindowsPatchWizard' -Name 'FileMove' -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern bool MoveFileEx(string existingFileName, string newFileName, int flags);
+'@
+    }
     $temporaryPath = '{0}.{1}.tmp' -f $script:StatusPath, ([Guid]::NewGuid().ToString('N'))
     try {
         $json = $script:Status | ConvertTo-Json -Depth 12
-        Set-Content -LiteralPath $temporaryPath -Value $json -Encoding UTF8
-        Move-Item -LiteralPath $temporaryPath -Destination $script:StatusPath -Force
+        [System.IO.File]::WriteAllText($temporaryPath, $json)
+        for ($attempt = 1; ; $attempt++) {
+            if ([WindowsPatchWizard.FileMove]::MoveFileEx($temporaryPath, $script:StatusPath, 1)) { break }
+            if ($attempt -ge 20) { throw [System.ComponentModel.Win32Exception]::new([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
+            Start-Sleep -Milliseconds 100
+        }
     }
     finally {
         if (Test-Path -LiteralPath $temporaryPath) {
