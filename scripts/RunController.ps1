@@ -5,6 +5,21 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'GuestOps.ps1')
 
+if (-not ('PatchFileMove' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class PatchFileMove {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool MoveFileEx(string existingFileName, string newFileName, int flags);
+    public static void Replace(string source, string destination) {
+        if (!MoveFileEx(source, destination, 1)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+}
+'@
+}
+
 $script:PatchSensitiveValues = @()
 
 function Get-PatchValue {
@@ -84,27 +99,45 @@ function Get-PatchRunDirectory {
     return (Split-Path -Parent (Get-PatchRunJsonPath -RunPath $RunPath))
 }
 
+function Move-PatchFileAtomic {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath
+    )
+
+    $source = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SourcePath)
+    $destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DestinationPath)
+    # MOVEFILE_REPLACE_EXISTING replaces atomically without deleting the target first;
+    # if a reader holds the file open, retry for up to about two seconds.
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            [PatchFileMove]::Replace($source, $destination)
+            break
+        }
+        catch {
+            if ($attempt -ge 20) { throw }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
 function Write-PatchTextAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$Text
     )
 
-    $parent = Split-Path -Parent $Path
+    $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $parent = Split-Path -Parent $fullPath
     if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
 
-    $temporaryPath = '{0}.{1}.tmp' -f $Path, ([Guid]::NewGuid().ToString('N'))
+    $temporaryPath = '{0}.{1}.tmp' -f $fullPath, ([Guid]::NewGuid().ToString('N'))
     $encoding = New-Object System.Text.UTF8Encoding($false)
     try {
         [System.IO.File]::WriteAllText($temporaryPath, $Text, $encoding)
-        # The window reads run.json every 500 ms during an action; while it has the file open the
-        # replace fails with an IOException, so it is retried for up to about two seconds.
-        for ($attempt = 1; ; $attempt++) {
-            try { Move-Item -LiteralPath $temporaryPath -Destination $Path -Force -ErrorAction Stop; break }
-            catch [System.IO.IOException] { if ($attempt -ge 20) { throw }; Start-Sleep -Milliseconds 100 }
-        }
+        Move-PatchFileAtomic -SourcePath $temporaryPath -DestinationPath $fullPath
     }
     finally {
         if (Test-Path -LiteralPath $temporaryPath) {
@@ -177,11 +210,13 @@ function Read-PatchRun {
     if (-not (Test-Path -LiteralPath $jsonPath -PathType Leaf)) {
         throw ('The patch run was not found: {0}' -f $jsonPath)
     }
+    $fullJsonPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($jsonPath)
+    $content = $null
     # The controller replaces run.json while the window reads it (and antivirus may open the new file), so a read
     # that hits that moment is retried for up to about two seconds, like the replace in Write-PatchTextAtomic.
     for ($attempt = 1; ; $attempt++) {
-        try { $content = [System.IO.File]::ReadAllText($jsonPath, (New-Object System.Text.UTF8Encoding($false))); break }
-        catch [System.IO.IOException] { if ($attempt -ge 20) { throw }; Start-Sleep -Milliseconds 100 }
+        try { $content = [System.IO.File]::ReadAllText($fullJsonPath, [System.Text.Encoding]::UTF8); break }
+        catch [System.IO.IOException], [System.UnauthorizedAccessException] { if ($attempt -ge 20) { throw }; Start-Sleep -Milliseconds 100 }
     }
     if ([string]::IsNullOrWhiteSpace($content)) {
         throw ('The patch run is empty: {0}' -f $jsonPath)
@@ -400,7 +435,7 @@ function Write-PatchSummary {
     $csvTemporary = Join-Path $runDirectory ('summary.csv.{0}.tmp' -f ([Guid]::NewGuid().ToString('N')))
     try {
         $vmRows | Export-Csv -LiteralPath $csvTemporary -NoTypeInformation -Encoding UTF8
-        Move-Item -LiteralPath $csvTemporary -Destination (Join-Path $runDirectory 'summary.csv') -Force
+        Move-PatchFileAtomic -SourcePath $csvTemporary -DestinationPath (Join-Path $runDirectory 'summary.csv')
     }
     finally {
         if (Test-Path -LiteralPath $csvTemporary) { Remove-Item -LiteralPath $csvTemporary -Force -ErrorAction SilentlyContinue }

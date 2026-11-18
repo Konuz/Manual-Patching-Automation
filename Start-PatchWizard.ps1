@@ -325,6 +325,7 @@ function Resume-WizardRun {
 
     try {
         $state = Read-PatchRun -RunPath $dialog.FileName
+        Set-PatchValue -InputObject $state -Name 'runPath' -Value $dialog.FileName
         Write-PatchSummary -RunPath $dialog.FileName -RunState $state
         $script:Wizard.RunState = $state
         $script:Wizard.RunPath = $dialog.FileName
