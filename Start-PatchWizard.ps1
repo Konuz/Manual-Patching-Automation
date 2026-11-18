@@ -525,6 +525,19 @@ function Get-WizardVmStatusText {
     return $status
 }
 
+function Set-WizardRowValues {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Forms.DataGridViewRow]$GridRow,
+        [Parameter(Mandatory = $true)][object[]]$Values
+    )
+
+    for ($column = 0; $column -lt $Values.Count; $column++) {
+        if ($GridRow.Cells[$column].Value -cne $Values[$column]) {
+            $GridRow.Cells[$column].Value = $Values[$column]
+        }
+    }
+}
+
 function Refresh-WizardVmGrid {
     if ($null -eq $script:Wizard.Controls.VmGrid) { return }
     $grid = $script:Wizard.Controls.VmGrid
@@ -544,20 +557,23 @@ function Refresh-WizardVmGrid {
             $vm = $vms[[int]$gridRow.Tag]
             $updates = @(Get-PatchArray (Get-PatchValue $vm @('availableUpdates') @()))
             $reboot = Get-PatchValue $vm @('reboot') $null
-            $gridRow.Cells[0].Value = [string](Get-PatchValue $vm @('vmName') '')
-            $gridRow.Cells[1].Value = [string](Get-PatchValue $vm @('expectedFqdn') '')
-            $gridRow.Cells[2].Value = Get-WizardVmStatusText -VM $vm
             # Only while the running action has no result for this VM yet.
             $vmAction = [string](Get-PatchValue $vm @('currentAction') '')
             $running = [string](Get-PatchValue $script:Wizard.RunState @('status') '') -eq 'Running' -and $vmAction -ne [string](Get-PatchValue $vm @('lastProcessedAction') '')
-            $gridRow.Cells[3].Value = $(if ($running) { $vmAction } else { '' })
-            $gridRow.Cells[4].Value = $updates.Count
-            $gridRow.Cells[5].Value = [string](Get-PatchValue $reboot @('status') 'NotRequested')
-            # Cluster membership from the last agent status; empty until the VM is scanned.
-            $gridRow.Cells[6].Value = $(if ($null -eq (Get-PatchValue $vm @('agentStatus') $null)) { '' } else { [string](Get-PatchClusterMembership -VMRecord $vm) })
             $errors = @(Get-PatchArray (Get-PatchValue $vm @('errors') @()))
-            $gridRow.Cells[7].Value = $errors.Count
-            $gridRow.Cells[8].Value = [string](Get-PatchValue $vm @('accountGroup') '')
+            $values = @(
+                [string](Get-PatchValue $vm @('vmName') ''),
+                [string](Get-PatchValue $vm @('expectedFqdn') ''),
+                (Get-WizardVmStatusText -VM $vm),
+                $(if ($running) { $vmAction } else { '' }),
+                $updates.Count,
+                [string](Get-PatchValue $reboot @('status') 'NotRequested'),
+                # Cluster membership from the last agent status; empty until the VM is scanned.
+                $(if ($null -eq (Get-PatchValue $vm @('agentStatus') $null)) { '' } else { [string](Get-PatchClusterMembership -VMRecord $vm) }),
+                $errors.Count,
+                [string](Get-PatchValue $vm @('accountGroup') '')
+            )
+            Set-WizardRowValues -GridRow $gridRow -Values $values
         }
         # Statuses change during an action, so an active sort is applied again (equal values keep their order).
         if ($null -ne $script:Wizard.GridSort[$grid]) { Set-WizardGridSort -Grid $grid }
@@ -582,18 +598,27 @@ function Get-WizardPendingRebootVms {
 function Refresh-WizardRebootGrid {
     $grid = $script:Wizard.Controls.RebootGrid
     if ($null -eq $grid) { return }
-    $grid.Rows.Clear()
     $pending = @(Get-WizardPendingRebootVms)
-    for ($i = 0; $i -lt $pending.Count; $i++) {
-        $vm = $pending[$i]
-        $index = $grid.Rows.Add(
+    for ($i = $grid.Rows.Count - 1; $i -ge 0; $i--) {
+        if ([int]$grid.Rows[$i].Tag -ge $pending.Count) {
+            $grid.Rows.RemoveAt($i)
+        }
+    }
+    for ($i = $grid.Rows.Count; $i -lt $pending.Count; $i++) {
+        $index = $grid.Rows.Add('', '', '', '')
+        $grid.Rows[$index].Tag = $i
+    }
+    foreach ($gridRow in $grid.Rows) {
+        $vm = $pending[[int]$gridRow.Tag]
+        $values = @(
             [string](Get-PatchValue $vm @('vmName') ''),
             [string](Get-PatchValue $vm @('expectedFqdn') ''),
             [string](Get-PatchValue $vm @('status') 'Pending'),
-            [string](Get-PatchValue (Get-PatchValue $vm @('agentStatus') $null) @('outcome') 'Pending reboot'))
-        $grid.Rows[$index].Tag = $i
+            [string](Get-PatchValue (Get-PatchValue $vm @('agentStatus') $null) @('outcome') 'Pending reboot')
+        )
+        Set-WizardRowValues -GridRow $gridRow -Values $values
     }
-    Set-WizardGridSort -Grid $grid
+    if ($null -ne $script:Wizard.GridSort[$grid]) { Set-WizardGridSort -Grid $grid }
     $script:Wizard.Controls.RebootButton.Enabled = ($grid.Rows.Count -gt 0 -and $null -eq $script:Wizard.ActivePowerShell)
 }
 
@@ -641,10 +666,13 @@ function Update-WizardProgress {
     if ($total -gt 0) {
         $percent = [int][Math]::Floor(($done * 100.0) / $total)
     }
-    $script:Wizard.Controls.ProgressBar.Value = $percent
     if ([string]::IsNullOrWhiteSpace($actionText)) { $actionText = 'No action' }
-    $script:Wizard.Controls.ProgressLabel.Text = ('{0}: {1} of {2} VM rows processed' -f $actionText, $done, $total)
-    Update-WizardStatusLayout
+    $progressText = '{0}: {1} of {2} VM rows processed' -f $actionText, $done, $total
+    if ($script:Wizard.Controls.ProgressBar.Value -ne $percent -or $script:Wizard.Controls.ProgressLabel.Text -cne $progressText) {
+        $script:Wizard.Controls.ProgressBar.Value = $percent
+        $script:Wizard.Controls.ProgressLabel.Text = $progressText
+        Update-WizardStatusLayout
+    }
 }
 
 function Refresh-WizardRunLog {
@@ -1160,9 +1188,16 @@ function New-WizardTextBox {
     return $textBox
 }
 
+function Enable-WizardDoubleBuffering {
+    param([Parameter(Mandatory = $true)][System.Windows.Forms.Control]$Control)
+    $property = $Control.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic,Public')
+    if ($null -ne $property) { $property.SetValue($Control, $true, $null) }
+}
+
 function Set-WizardGridScaling {
     # Columns share the grid width in fixed proportions; row and header heights follow the font.
     param([System.Windows.Forms.DataGridView]$Grid)
+    Enable-WizardDoubleBuffering -Control $Grid
     $Grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
     $Grid.AutoSizeRowsMode = [System.Windows.Forms.DataGridViewAutoSizeRowsMode]::DisplayedCells
     $Grid.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::AutoSize
@@ -1357,6 +1392,7 @@ public class PatchWizardRowComparer : IComparer {
     [System.Windows.Forms.Application]::EnableVisualStyles()
 
     $form = New-Object System.Windows.Forms.Form
+    Enable-WizardDoubleBuffering -Control $form
     $form.Text = 'Windows Patch Wizard'
     $form.StartPosition = 'CenterScreen'
     $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
